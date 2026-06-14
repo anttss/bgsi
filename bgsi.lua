@@ -4,6 +4,7 @@ local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
+local TeleportService = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 
 local RemoteEvent = ReplicatedStorage.Shared.Framework.Network.Remote.RemoteEvent
@@ -17,6 +18,7 @@ local Pets = require(ReplicatedStorage.Shared.Data.Pets)
 --   CONFIG & FILE SYSTEM UTILITIES
 -- ======================================
 local FILE_NAME = "Hub_Config.json"
+local REJOIN_STATE_FILE = "Hub_Rejoin_State.json"
 
 local function getDefaults()
     return {
@@ -25,7 +27,8 @@ local function getDefaults()
         TOGGLE_KEY = "RightShift",
         FPS_CAP = "60",
         SELECTED_EGG = "Flame Egg",
-        HATCH_DELAY = "0.05"
+        HATCH_DELAY = "0.05",
+        AUTO_REJOIN = "false"
     }
 end
 
@@ -51,6 +54,41 @@ local function loadConfig()
     end
 end
 loadConfig()
+
+local function boolValue(value)
+    if value == true then return true end
+    if value == false or value == nil then return false end
+    local text = string.lower(tostring(value))
+    return text == "true" or text == "1" or text == "yes" or text == "on"
+end
+
+local function encodeVector3(pos)
+    if typeof(pos) ~= "Vector3" then return nil end
+    return { X = pos.X, Y = pos.Y, Z = pos.Z }
+end
+
+local function decodeVector3(data)
+    if type(data) ~= "table" then return nil end
+    local x, y, z = tonumber(data.X), tonumber(data.Y), tonumber(data.Z)
+    if not x or not y or not z then return nil end
+    return Vector3.new(x, y, z)
+end
+
+local function loadRejoinState()
+    if not (readfile and isfile and isfile(REJOIN_STATE_FILE)) then return nil end
+    local ok, content = pcall(function() return readfile(REJOIN_STATE_FILE) end)
+    if not ok or not content or content == "" then return nil end
+    local ok2, decoded = pcall(function() return HttpService:JSONDecode(content) end)
+    if ok2 and type(decoded) == "table" then return decoded end
+    return nil
+end
+
+local persistedRejoinState = loadRejoinState()
+if persistedRejoinState and type(persistedRejoinState.Config) == "table" and boolValue(persistedRejoinState.AutoRejoinEnabled) then
+    for k, v in pairs(persistedRejoinState.Config) do
+        Config[k] = v
+    end
+end
 
 -- ======================================
 --   RESTORED HARDCODED LOOKUP METADATA
@@ -105,13 +143,20 @@ local autoQuesting = false
 local uiVisible = true
 local scriptActive = true
 
-local eggsHatched = 0
-local secretPetsHatched = 0
+local resumeStateActive = persistedRejoinState and boolValue(persistedRejoinState.AutoRejoinEnabled)
+local savedSessionElapsed = resumeStateActive and (tonumber(persistedRejoinState.SessionElapsed) or 0) or 0
+
+local eggsHatched = resumeStateActive and (tonumber(persistedRejoinState.EggsHatched) or 0) or 0
+local secretPetsHatched = resumeStateActive and (tonumber(persistedRejoinState.SecretPetsHatched) or 0) or 0
+local rejoinCount = resumeStateActive and (tonumber(persistedRejoinState.Rejoins) or 0) or 0
+if resumeStateActive and persistedRejoinState and persistedRejoinState.Reason == "scheduled_rejoin" then
+    rejoinCount = rejoinCount + 1
+end
 local selectedEgg = Config.SELECTED_EGG
-local startTime = os.time()
+local startTime = os.time() - savedSessionElapsed
 
 local hatchThread, teleportThread, eSpamThread, enchantThread, permShrineThread, timedShrineThread
-local seasonPassThread, presentRainThread, autoQuestThread
+local seasonPassThread, presentRainThread, autoQuestThread, autoRejoinThread
 local loopThreads = {}
 local webhookQueue = {}
 local webhookProcessing = false
@@ -238,6 +283,12 @@ local function processWebhookQueue()
     end)
 end
 
+local function queueWebhookMessage(message)
+    if not Config.WEBHOOK_URL or Config.WEBHOOK_URL == "" then return end
+    table.insert(webhookQueue, { content = tostring(message or "") })
+    processWebhookQueue()
+end
+
 local function buildAndQueueEmbed(rawPetName, petData, extras)
     if not Config.WEBHOOK_URL or Config.WEBHOOK_URL == "" then return end
     
@@ -335,6 +386,11 @@ local accountMiniFrame
 local accountMiniBody
 local accountMiniText
 local accountMiniMinimized = false
+local autoRejoinToggle
+
+local startAutoRejoin
+local stopAutoRejoin
+local saveRejoinState
 
 local function makeSignal()
     local signal = { _callbacks = {} }
@@ -451,6 +507,42 @@ local function createInputProxy(tab, name, current, placeholder, flag)
             end
         end
     })
+end
+
+local function createToggleProxy(tab, name, current, flag, callback)
+    local changed = makeSignal()
+    local proxy = {
+        _value = current == true,
+        _element = nil,
+        Changed = changed
+    }
+
+    proxy._element = protectCall(function()
+        return tab:CreateToggle({
+            Name = name,
+            CurrentValue = proxy._value,
+            Flag = flag,
+            Callback = function(value)
+                proxy._value = value == true
+                changed:Fire(proxy._value)
+                if callback then
+                    callback(proxy._value)
+                end
+            end,
+        })
+    end)
+
+    function proxy:Set(value)
+        self._value = value == true
+        if self._element and self._element.Set then
+            pcall(function() self._element:Set(self._value) end)
+        else
+            changed:Fire(self._value)
+            if callback then callback(self._value) end
+        end
+    end
+
+    return proxy
 end
 
 local function createLabelProxy(tab, text)
@@ -649,6 +741,7 @@ if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
     counterLabel = createLabelProxy(Tabs.Stats, "Eggs Hatched: 0")
     rateLabel = createLabelProxy(Tabs.Stats, "Hatch Rate: 0 / m")
     sessionTimeLabel = createLabelProxy(Tabs.Stats, "Session Time: 00:00:00")
+    rejoinLabel = createLabelProxy(Tabs.Stats, "Rejoins: " .. formatCommas(rejoinCount))
     selectedEggLabel = createLabelProxy(Tabs.Stats, "Selected Egg: " .. tostring(selectedEgg or "None"))
 
     Tabs.Main:CreateSection("Automation")
@@ -727,12 +820,24 @@ if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
 
     Tabs.Settings:CreateDivider()
     Tabs.Settings:CreateSection("Session")
+    autoRejoinToggle = createToggleProxy(Tabs.Settings, "Auto Rejoin", boolValue(Config.AUTO_REJOIN), "AutoRejoin_Toggle", function(value)
+        Config.AUTO_REJOIN = value and "true" or "false"
+        saveConfig()
+        if startAutoRejoin and stopAutoRejoin then
+            if value then
+                startAutoRejoin()
+            else
+                stopAutoRejoin(false)
+            end
+        end
+    end)
     exitBtn = createButtonProxy(Tabs.Settings, "End Script Session")
 else
     warn("Rayfield failed to load. UI controls were not created.")
     counterLabel = createFallbackLabel("Eggs Hatched: 0")
     rateLabel = createFallbackLabel("Hatch Rate: 0 / m")
     sessionTimeLabel = createFallbackLabel("Session Time: 00:00:00")
+    rejoinLabel = createFallbackLabel("Rejoins: " .. formatCommas(rejoinCount))
     hatchBtn = createFallbackButton("Auto Hatch Core: OFF")
     teleportBtn = createFallbackButton("Teleport Loop: OFF")
     eSpamBtn = createFallbackButton("Key E Spam: OFF")
@@ -757,6 +862,7 @@ else
     autoQuestBtn = createFallbackButton("Auto Quest: OFF")
     fpsInput = createFallbackInput(Config.FPS_CAP)
     bindBtn = createFallbackButton("Current Bind: " .. Config.TOGGLE_KEY)
+    autoRejoinToggle = nil
     exitBtn = createFallbackButton("End Script Session")
     selectedEggLabel = createFallbackLabel("Selected Egg: " .. tostring(selectedEgg or "None"))
     accountsParagraph = createFallbackLabel("Accounts: Rayfield unavailable")
@@ -987,6 +1093,7 @@ local function unloadScript()
     autoSeasonPass = false
     autoPresentRain = false
     autoQuesting = false
+    if stopAutoRejoin then stopAutoRejoin(false) end
     
     if hatchThread then pcall(function() task.cancel(hatchThread) end) end
     if teleportThread then pcall(function() task.cancel(teleportThread) end) end
@@ -997,6 +1104,7 @@ local function unloadScript()
     if seasonPassThread then pcall(function() task.cancel(seasonPassThread) end) end
     if presentRainThread then pcall(function() task.cancel(presentRainThread) end) end
     if autoQuestThread then pcall(function() task.cancel(autoQuestThread) end) end
+    if autoRejoinThread then pcall(function() task.cancel(autoRejoinThread) end) end
     for _, t in ipairs(loopThreads) do pcall(function() task.cancel(t) end) end
     for _, c in ipairs(connections) do if c and c.Connected then c:Disconnect() end end
     
@@ -1020,6 +1128,9 @@ local function updateHatchDisplays()
     rateLabel.Text = (elapsed > 0 and eggsHatched > 0) and ("Hatch Rate: " .. formatCommas((eggsHatched / elapsed) * 60) .. " / m") or "Hatch Rate: 0 / m"
     if sessionTimeLabel then
         sessionTimeLabel.Text = "Session Time: " .. formatSessionTime(elapsed)
+    end
+    if rejoinLabel then
+        rejoinLabel.Text = "Rejoins: " .. formatCommas(rejoinCount)
     end
 end
 
@@ -1273,6 +1384,133 @@ local function updateAccountsDisplay()
     end
 
     updateMiniAccountsWindow()
+end
+
+local function getCurrentSessionElapsed()
+    return math.max(os.time() - startTime, 0)
+end
+
+local function getSavedPosition()
+    local root = getRoot()
+    return root and root.Position or nil
+end
+
+saveRejoinState = function(reason)
+    if not writefile then return false end
+
+    local state = {
+        Version = 1,
+        Reason = reason or "autosave",
+        SavedAt = os.time(),
+        PlaceId = game.PlaceId,
+        JobId = game.JobId,
+        AutoRejoinEnabled = boolValue(Config.AUTO_REJOIN),
+        SelectedEgg = selectedEgg,
+        EggsHatched = eggsHatched,
+        SecretPetsHatched = secretPetsHatched,
+        Rejoins = rejoinCount,
+        SessionElapsed = getCurrentSessionElapsed(),
+        Position = encodeVector3(getSavedPosition()),
+        SavedBubblePos = encodeVector3(savedBubblePos),
+        Config = Config,
+        Toggles = {
+            AutoHatch = running,
+            TeleportLoop = teleporting,
+            ESpam = eSpamming,
+            AutoEnchant = autoEnchanting,
+            PermanentShrine = autoPermanentShrine,
+            TimedShrines = autoTimedShrines,
+            SeasonPass = autoSeasonPass,
+            PresentRain = autoPresentRain,
+            AutoQuest = autoQuesting
+        }
+    }
+
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(state) end)
+    if ok and encoded then
+        pcall(function() writefile(REJOIN_STATE_FILE, encoded) end)
+        return true
+    end
+
+    return false
+end
+
+stopAutoRejoin = function(clearSavedState)
+    if autoRejoinThread then
+        pcall(function() task.cancel(autoRejoinThread) end)
+        autoRejoinThread = nil
+    end
+
+    if clearSavedState and delfile and isfile and isfile(REJOIN_STATE_FILE) then
+        pcall(function() delfile(REJOIN_STATE_FILE) end)
+    end
+end
+
+startAutoRejoin = function()
+    stopAutoRejoin(false)
+
+    if not boolValue(Config.AUTO_REJOIN) then return end
+
+    autoRejoinThread = task.spawn(function()
+        while scriptActive and boolValue(Config.AUTO_REJOIN) do
+            task.wait(900)
+            if not scriptActive or not boolValue(Config.AUTO_REJOIN) then break end
+
+            saveRejoinState("scheduled_rejoin")
+            task.wait(1)
+
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+            end)
+        end
+    end)
+end
+
+local function restoreSavedPositionFromState()
+    if not resumeStateActive or not persistedRejoinState then return end
+
+    local savedPos = decodeVector3(persistedRejoinState.Position)
+    local savedBubble = decodeVector3(persistedRejoinState.SavedBubblePos)
+    if savedBubble then savedBubblePos = savedBubble end
+
+    if savedPos then
+        task.spawn(function()
+            if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
+            task.wait(1)
+            teleportTo(savedPos)
+        end)
+    end
+end
+
+local function restoreSavedTogglesFromState()
+    if not resumeStateActive or not persistedRejoinState then return end
+    local toggles = persistedRejoinState.Toggles
+    if type(toggles) ~= "table" then return end
+
+    task.spawn(function()
+        task.wait(2)
+
+        local isScheduledRejoinResume = persistedRejoinState and persistedRejoinState.Reason == "scheduled_rejoin"
+        if isScheduledRejoinResume then
+            queueWebhookMessage("Rejoined `" .. tostring(game.JobId) .. "`")
+        end
+
+        if toggles.AutoHatch and not running and hatchBtn then
+            hatchBtn.MouseButton1Click:Fire()
+            task.wait(0.5)
+            if isScheduledRejoinResume and running then
+                queueWebhookMessage("Hatching has resumed successfully")
+            end
+        end
+        if toggles.TeleportLoop and not teleporting and teleportBtn then teleportBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.ESpam and not eSpamming and eSpamBtn then eSpamBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.AutoEnchant and not autoEnchanting and enchantBtn then enchantBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.PermanentShrine and not autoPermanentShrine and togglePermShrineBtn then togglePermShrineBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.TimedShrines and not autoTimedShrines and toggleTimedShrineBtn then toggleTimedShrineBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.SeasonPass and not autoSeasonPass and seasonPassBtn then seasonPassBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.PresentRain and not autoPresentRain and presentRainBtn then presentRainBtn.MouseButton1Click:Fire() task.wait(0.2) end
+        if toggles.AutoQuest and not autoQuesting and autoQuestBtn then autoQuestBtn.MouseButton1Click:Fire() task.wait(0.2) end
+    end)
 end
 
 local function applyFpsLimit(valStr)
@@ -1867,3 +2105,8 @@ table.insert(loopThreads, loop2)
 switchTab(mainPage, mainTabBtn)
 if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
 setWalkSpeed(WALKSPEED)
+restoreSavedPositionFromState()
+restoreSavedTogglesFromState()
+if boolValue(Config.AUTO_REJOIN) then
+    startAutoRejoin()
+end
