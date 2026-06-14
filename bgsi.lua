@@ -106,6 +106,7 @@ local uiVisible = true
 local scriptActive = true
 
 local eggsHatched = 0
+local secretPetsHatched = 0
 local selectedEgg = Config.SELECTED_EGG
 local startTime = os.time()
 
@@ -326,6 +327,14 @@ local bindBtn
 local exitBtn
 local questParagraph
 local selectedEggLabel
+local accountsParagraph
+local accountRefreshButton
+local accountMiniButton
+local accountMiniGui
+local accountMiniFrame
+local accountMiniBody
+local accountMiniText
+local accountMiniMinimized = false
 
 local function makeSignal()
     local signal = { _callbacks = {} }
@@ -632,6 +641,7 @@ if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
         Enchant = Window:CreateTab("Enchant", 0),
         Quests = Window:CreateTab("Quests", 0),
         Shrines = Window:CreateTab("Shrines", 0),
+        Accounts = Window:CreateTab("Accounts", 0),
         Settings = Window:CreateTab("Settings", 0)
     }
 
@@ -697,6 +707,14 @@ if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
     timedDreamInput = createInputProxy(Tabs.Shrines, "Dreamer Dust Qty", "15", "Dust Qty", "TimedShrine_Dreamer")
     toggleTimedShrineBtn = createButtonProxy(Tabs.Shrines, "Automate Timed Shrines: OFF")
 
+    Tabs.Accounts:CreateSection("Running Accounts")
+    accountsParagraph = Tabs.Accounts:CreateParagraph({
+        Title = "Accounts",
+        Content = "Loading account stats..."
+    })
+    accountRefreshButton = createButtonProxy(Tabs.Accounts, "Refresh Accounts")
+    accountMiniButton = createButtonProxy(Tabs.Accounts, "Open Mini Accounts Window")
+
     Tabs.Settings:CreateSection("Webhook")
     webUrlInput = createInputProxy(Tabs.Settings, "Webhook URL", Config.WEBHOOK_URL, "Discord Webhook URL", "WebhookURL_Input")
     pingIdInput = createInputProxy(Tabs.Settings, "Ping User ID", Config.DISCORD_PING_ID, "Discord User ID", "PingID_Input")
@@ -741,6 +759,9 @@ else
     bindBtn = createFallbackButton("Current Bind: " .. Config.TOGGLE_KEY)
     exitBtn = createFallbackButton("End Script Session")
     selectedEggLabel = createFallbackLabel("Selected Egg: " .. tostring(selectedEgg or "None"))
+    accountsParagraph = createFallbackLabel("Accounts: Rayfield unavailable")
+    accountRefreshButton = createFallbackButton("Refresh Accounts")
+    accountMiniButton = createFallbackButton("Open Mini Accounts Window")
 end
 
 screenGui = {
@@ -1002,11 +1023,277 @@ local function updateHatchDisplays()
     end
 end
 
+local function getLeaderstatValue(player, names)
+    local leaderstats = player and player:FindFirstChild("leaderstats")
+    if not leaderstats then return nil end
+
+    for _, statName in ipairs(names) do
+        local stat = leaderstats:FindFirstChild(statName)
+        if stat and stat.Value ~= nil then
+            return stat.Value
+        end
+    end
+
+    local lowered = {}
+    for _, statName in ipairs(names) do
+        lowered[string.lower(statName)] = true
+    end
+
+    for _, stat in ipairs(leaderstats:GetChildren()) do
+        local key = string.lower(stat.Name)
+        if lowered[key] and stat.Value ~= nil then
+            return stat.Value
+        end
+    end
+
+    return nil
+end
+
+local function getAccountStatsText()
+    local elapsed = math.max(os.time() - startTime, 0)
+    local localRate = (elapsed > 0 and eggsHatched > 0) and ((eggsHatched / elapsed) * 60) or 0
+    local lines = {}
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local isLocal = player == LocalPlayer
+        local hatchTotal = getLeaderstatValue(player, {"Hatches", "Eggs Hatched", "EggsHatched", "Eggs", "Hatch"})
+        local secretTotal = getLeaderstatValue(player, {"Secrets", "Secret Pets", "SecretPets", "Secrets Hatched", "SecretHatches"})
+
+        if isLocal then
+            hatchTotal = eggsHatched
+            secretTotal = secretPetsHatched
+        end
+
+        local displayName = player.Name
+        if player.DisplayName and player.DisplayName ~= player.Name then
+            displayName = player.DisplayName .. " (@" .. player.Name .. ")"
+        else
+            displayName = "@" .. player.Name
+        end
+
+        local sessionText = isLocal and formatSessionTime(elapsed) or "N/A"
+        local rateText = isLocal and (formatCommas(localRate) .. " / m") or "N/A"
+        local hatchesText = hatchTotal ~= nil and formatCommas(hatchTotal) or "N/A"
+        local secretsText = secretTotal ~= nil and formatCommas(secretTotal) or "N/A"
+
+        table.insert(lines, table.concat({
+            displayName,
+            "Hatches: " .. hatchesText,
+            "Rate: " .. rateText,
+            "Session: " .. sessionText,
+            "Secret Pets: " .. secretsText
+        }, "\n"))
+    end
+
+    if #lines == 0 then
+        return "No accounts detected."
+    end
+
+    return table.concat(lines, "\n\n")
+end
+
+
+local function setMiniAccountsMinimized(state)
+    accountMiniMinimized = state and true or false
+    if not accountMiniFrame then return end
+    if accountMiniBody then
+        accountMiniBody.Visible = not accountMiniMinimized
+    end
+    accountMiniFrame.Size = accountMiniMinimized and UDim2.new(0, 250, 0, 34) or UDim2.new(0, 250, 0, 210)
+end
+
+local function updateMiniAccountsWindow()
+    if accountMiniText then
+        accountMiniText.Text = getAccountStatsText()
+    end
+end
+
+local function ensureMiniAccountsWindow()
+    if accountMiniGui and accountMiniGui.Parent then
+        accountMiniGui.Enabled = true
+        setMiniAccountsMinimized(false)
+        updateMiniAccountsWindow()
+        return
+    end
+
+    accountMiniGui = Instance.new("ScreenGui")
+    accountMiniGui.Name = "AccountsMiniWindow"
+    accountMiniGui.ResetOnSpawn = false
+    accountMiniGui.IgnoreGuiInset = true
+    accountMiniGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    accountMiniGui.Parent = LocalPlayer.PlayerGui
+
+    accountMiniFrame = Instance.new("Frame")
+    accountMiniFrame.Size = UDim2.new(0, 250, 0, 210)
+    accountMiniFrame.Position = UDim2.new(1, -270, 0, 110)
+    accountMiniFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+    accountMiniFrame.BorderSizePixel = 0
+    accountMiniFrame.Parent = accountMiniGui
+
+    local frameCorner = Instance.new("UICorner")
+    frameCorner.CornerRadius = UDim.new(0, 8)
+    frameCorner.Parent = accountMiniFrame
+
+    local frameStroke = Instance.new("UIStroke")
+    frameStroke.Color = Color3.fromRGB(48, 48, 48)
+    frameStroke.Thickness = 1
+    frameStroke.Parent = accountMiniFrame
+
+    local top = Instance.new("Frame")
+    top.Name = "Topbar"
+    top.Size = UDim2.new(1, 0, 0, 34)
+    top.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    top.BorderSizePixel = 0
+    top.Parent = accountMiniFrame
+
+    local topCorner = Instance.new("UICorner")
+    topCorner.CornerRadius = UDim.new(0, 8)
+    topCorner.Parent = top
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -70, 1, 0)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "Accounts"
+    title.TextColor3 = Color3.fromRGB(235, 235, 235)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = top
+
+    local minimize = Instance.new("TextButton")
+    minimize.Size = UDim2.new(0, 26, 0, 22)
+    minimize.Position = UDim2.new(1, -58, 0, 6)
+    minimize.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+    minimize.TextColor3 = Color3.fromRGB(220, 220, 220)
+    minimize.Text = "-"
+    minimize.Font = Enum.Font.GothamBold
+    minimize.TextSize = 14
+    minimize.BorderSizePixel = 0
+    minimize.Parent = top
+    Instance.new("UICorner", minimize).CornerRadius = UDim.new(0, 5)
+
+    local close = Instance.new("TextButton")
+    close.Size = UDim2.new(0, 26, 0, 22)
+    close.Position = UDim2.new(1, -30, 0, 6)
+    close.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+    close.TextColor3 = Color3.fromRGB(220, 220, 220)
+    close.Text = "x"
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 12
+    close.BorderSizePixel = 0
+    close.Parent = top
+    Instance.new("UICorner", close).CornerRadius = UDim.new(0, 5)
+
+    accountMiniBody = Instance.new("Frame")
+    accountMiniBody.Size = UDim2.new(1, -16, 1, -46)
+    accountMiniBody.Position = UDim2.new(0, 8, 0, 40)
+    accountMiniBody.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+    accountMiniBody.BorderSizePixel = 0
+    accountMiniBody.Parent = accountMiniFrame
+    Instance.new("UICorner", accountMiniBody).CornerRadius = UDim.new(0, 6)
+
+    accountMiniText = Instance.new("TextLabel")
+    accountMiniText.Size = UDim2.new(1, -14, 1, -12)
+    accountMiniText.Position = UDim2.new(0, 7, 0, 6)
+    accountMiniText.BackgroundTransparency = 1
+    accountMiniText.TextColor3 = Color3.fromRGB(210, 210, 210)
+    accountMiniText.Font = Enum.Font.Gotham
+    accountMiniText.TextSize = 10
+    accountMiniText.TextXAlignment = Enum.TextXAlignment.Left
+    accountMiniText.TextYAlignment = Enum.TextYAlignment.Top
+    accountMiniText.TextWrapped = true
+    accountMiniText.Parent = accountMiniBody
+
+    minimize.MouseButton1Click:Connect(function()
+        setMiniAccountsMinimized(not accountMiniMinimized)
+        minimize.Text = accountMiniMinimized and "+" or "-"
+    end)
+
+    close.MouseButton1Click:Connect(function()
+        if accountMiniGui then
+            accountMiniGui.Enabled = false
+        end
+    end)
+
+    local UIS = UserInputService
+    local draggingMini = false
+    local dragInputMini = nil
+    local dragStartMini = nil
+    local startPosMini = nil
+
+    top.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingMini = true
+            dragStartMini = input.Position
+            startPosMini = accountMiniFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    draggingMini = false
+                end
+            end)
+        end
+    end)
+
+    top.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInputMini = input
+        end
+    end)
+
+    local dragConn = UIS.InputChanged:Connect(function(input)
+        if input == dragInputMini and draggingMini and accountMiniFrame then
+            local delta = input.Position - dragStartMini
+            accountMiniFrame.Position = UDim2.new(
+                startPosMini.X.Scale,
+                startPosMini.X.Offset + delta.X,
+                startPosMini.Y.Scale,
+                startPosMini.Y.Offset + delta.Y
+            )
+        end
+    end)
+    table.insert(connections, dragConn)
+
+    updateMiniAccountsWindow()
+end
+
+local function updateAccountsDisplay()
+    if not scriptActive then return end
+
+    local content = getAccountStatsText()
+    if accountsParagraph.Set then
+        pcall(function()
+            accountsParagraph:Set({
+                Title = "Accounts",
+                Content = content
+            })
+        end)
+    elseif accountsParagraph then
+        accountsParagraph.Text = content
+    end
+
+    updateMiniAccountsWindow()
+end
+
 local function applyFpsLimit(valStr)
     local num = tonumber(valStr) or 60
     if setfpscap then setfpscap(num) end
 end
 fpsInput.FocusLost:Connect(function() Config.FPS_CAP = fpsInput.Text saveConfig() applyFpsLimit(Config.FPS_CAP) end)
+if accountRefreshButton then
+    accountRefreshButton.MouseButton1Click:Connect(function()
+        updateAccountsDisplay()
+        rayNotify("Accounts", "Account stats refreshed.", 2)
+    end)
+end
+
+if accountMiniButton then
+    accountMiniButton.MouseButton1Click:Connect(function()
+        ensureMiniAccountsWindow()
+        rayNotify("Accounts", "Mini accounts window opened.", 2)
+    end)
+end
+
 applyFpsLimit(Config.FPS_CAP)
 
 -- ======================================
@@ -1280,6 +1567,9 @@ if success and HatchingModule and type(HatchingModule) == "table" and HatchingMo
                     local ok, petInfo = pcall(function() return Pets[pet.Name] end)
                     if ok and petInfo then
                         local r = petInfo.Rarity
+                        if r == "Secret" then
+                            secretPetsHatched = secretPetsHatched + 1
+                        end
                         if r == "Secret" or r == "Celestial" or r == "Infinity" or r == "Void" then
                             task.spawn(function()
                                 buildAndQueueEmbed(pet.Name, petInfo, {Shiny = pet.Shiny, Mythic = pet.Mythic, XL = pet.XL})
@@ -1563,8 +1853,13 @@ end)
 -- The old custom draggable code depended on custom Frame instances and breaks when using Rayfield or fallback proxy controls.
 
 -- Initialization Loops
-local loop1 = task.spawn(function() while scriptActive do task.wait(1) updateHatchDisplays() end end)
+local loop1 = task.spawn(function() while scriptActive do task.wait(1) updateHatchDisplays() updateAccountsDisplay() end end)
 table.insert(loopThreads, loop1)
+
+local playerAddedConn = Players.PlayerAdded:Connect(function() task.defer(updateAccountsDisplay) end)
+table.insert(connections, playerAddedConn)
+local playerRemovingConn = Players.PlayerRemoving:Connect(function() task.defer(updateAccountsDisplay) end)
+table.insert(connections, playerRemovingConn)
 
 local loop2 = task.spawn(function() while scriptActive do task.wait(2.5) updateQuestDisplay() end end)
 table.insert(loopThreads, loop2)
