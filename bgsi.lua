@@ -20,11 +20,11 @@ local FILE_NAME = "Hub_Config.json"
 
 local function getDefaults()
     return {
-        WEBHOOK_URL = "",
+        WEBHOOK_URL = "https://discord.com/api/webhooks/1515448845054644254/h9VK3FvOyM55T_2_yfB5FB6jDuHj0AnGjgfvcD9l4TWJ8OVX2Bi4ObvaaWnpyRxi_VZZ",
         DISCORD_PING_ID = "",
         TOGGLE_KEY = "RightShift",
         FPS_CAP = "60",
-        SELECTED_EGG = "Flame Egg",
+        SELECTED_EGG = "4x Luck Egg",
         HATCH_DELAY = "0.05"
     }
 end
@@ -87,6 +87,7 @@ local EGGS = {
 local HATCH_AMOUNT = 12
 local WALKSPEED = 75
 local DEFAULT_HATCH_EGG = "4x Luck Egg"
+local QUEST_FALLBACK_EGG = "Common Egg"
 local HATCH_DELAY = tonumber(Config.HATCH_DELAY) or 0.05
 if HATCH_DELAY <= 0 then HATCH_DELAY = 0.05 end
 
@@ -297,6 +298,7 @@ local screenGui
 local frame
 local counterLabel
 local rateLabel
+local sessionTimeLabel
 local hatchBtn
 local teleportBtn
 local eSpamBtn
@@ -636,6 +638,7 @@ if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
     Tabs.Stats:CreateSection("Hatch Monitor")
     counterLabel = createLabelProxy(Tabs.Stats, "Eggs Hatched: 0")
     rateLabel = createLabelProxy(Tabs.Stats, "Hatch Rate: 0 / m")
+    sessionTimeLabel = createLabelProxy(Tabs.Stats, "Session Time: 00:00:00")
     selectedEggLabel = createLabelProxy(Tabs.Stats, "Selected Egg: " .. tostring(selectedEgg or "None"))
 
     Tabs.Main:CreateSection("Automation")
@@ -711,6 +714,7 @@ else
     warn("Rayfield failed to load. UI controls were not created.")
     counterLabel = createFallbackLabel("Eggs Hatched: 0")
     rateLabel = createFallbackLabel("Hatch Rate: 0 / m")
+    sessionTimeLabel = createFallbackLabel("Session Time: 00:00:00")
     hatchBtn = createFallbackButton("Auto Hatch Core: OFF")
     teleportBtn = createFallbackButton("Teleport Loop: OFF")
     eSpamBtn = createFallbackButton("Key E Spam: OFF")
@@ -736,6 +740,7 @@ else
     fpsInput = createFallbackInput(Config.FPS_CAP)
     bindBtn = createFallbackButton("Current Bind: " .. Config.TOGGLE_KEY)
     exitBtn = createFallbackButton("End Script Session")
+    selectedEggLabel = createFallbackLabel("Selected Egg: " .. tostring(selectedEgg or "None"))
 end
 
 screenGui = {
@@ -815,7 +820,7 @@ local function parseQuestText(text)
 
     local genericAmount = text:match("^Hatch (%d+) Eggs$")
     if genericAmount then
-        return { type = "Hatch", amount = tonumber(genericAmount), egg = DEFAULT_HATCH_EGG }
+        return { type = "Hatch", amount = tonumber(genericAmount), egg = QUEST_FALLBACK_EGG }
     end
 
     local hatchAmount, eggName = text:match("^Hatch (%d+) (.+) Eggs$")
@@ -979,11 +984,22 @@ local function unloadScript()
 end
 exitBtn.MouseButton1Click:Connect(unloadScript)
 
+local function formatSessionTime(seconds)
+    seconds = math.max(0, tonumber(seconds) or 0)
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
+end
+
 local function updateHatchDisplays()
     if not scriptActive then return end
-    counterLabel.Text = "Eggs Hatched: " .. formatCommas(eggsHatched)
     local elapsed = os.time() - startTime
+    counterLabel.Text = "Eggs Hatched: " .. formatCommas(eggsHatched)
     rateLabel.Text = (elapsed > 0 and eggsHatched > 0) and ("Hatch Rate: " .. formatCommas((eggsHatched / elapsed) * 60) .. " / m") or "Hatch Rate: 0 / m"
+    if sessionTimeLabel then
+        sessionTimeLabel.Text = "Session Time: " .. formatSessionTime(elapsed)
+    end
 end
 
 local function applyFpsLimit(valStr)
@@ -1387,10 +1403,20 @@ local function stopAutoQuest()
     setWalkSpeed(16)
 end
 
+local function resolveQuestEgg(eggName)
+    if eggName and EGGS[eggName] and eggName ~= "4x Luck Egg" then
+        return eggName
+    end
+    if EGGS[QUEST_FALLBACK_EGG] then
+        return QUEST_FALLBACK_EGG
+    end
+    return "Common Egg"
+end
+
 local function doHatchQuest(challenge)
     local q = challenge.quest
-    local targetEgg = (q and q.egg and EGGS[q.egg]) and q.egg or DEFAULT_HATCH_EGG
-    local pos = EGGS[targetEgg] or EGGS[DEFAULT_HATCH_EGG]
+    local targetEgg = resolveQuestEgg(q and q.egg)
+    local pos = EGGS[targetEgg]
 
     while autoQuesting and scriptActive do
         if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then break end
@@ -1426,8 +1452,9 @@ end
 local function doPlaytimeQuest(challenge)
     while autoQuesting and scriptActive do
         if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then break end
-        teleportTo(EGGS[DEFAULT_HATCH_EGG])
-        RemoteEvent:FireServer("HatchEgg", DEFAULT_HATCH_EGG, HATCH_AMOUNT)
+        local targetEgg = resolveQuestEgg(QUEST_FALLBACK_EGG)
+        teleportTo(EGGS[targetEgg])
+        RemoteEvent:FireServer("HatchEgg", targetEgg, HATCH_AMOUNT)
         task.spawn(updateHatchDisplays)
         updateQuestDisplay()
         task.wait(HATCH_DELAY)
