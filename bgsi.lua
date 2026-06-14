@@ -20,11 +20,12 @@ local FILE_NAME = "Hub_Config.json"
 
 local function getDefaults()
     return {
-        WEBHOOK_URL = "",
+        WEBHOOK_URL = "https://discord.com/api/webhooks/1515448845054644254/h9VK3FvOyM55T_2_yfB5FB6jDuHj0AnGjgfvcD9l4TWJ8OVX2Bi4ObvaaWnpyRxi_VZZ",
         DISCORD_PING_ID = "",
         TOGGLE_KEY = "RightShift",
         FPS_CAP = "60",
-        SELECTED_EGG = "4x Luck Egg"
+        SELECTED_EGG = "4x Luck Egg",
+        HATCH_DELAY = "0.05"
     }
 end
 
@@ -52,11 +53,8 @@ end
 loadConfig()
 
 -- ======================================
---   STATE MANAGEMENT & HARDCODED EGGS
+--   RESTORED HARDCODED LOOKUP METADATA
 -- ======================================
-local HATCH_AMOUNT = 12
-local WALKSPEED = 75
-
 local EGGS = {
     ["Common Egg"]         = Vector3.new(-59.7594, 13.7468, -4.9295),
     ["Inferno Egg"]        = Vector3.new(61.6161, -38.2405, -36.4416),
@@ -86,6 +84,12 @@ local EGGS = {
     ["Frozen Egg"]         = Vector3.new(686, 7611, -3466),
 }
 
+local HATCH_AMOUNT = 12
+local WALKSPEED = 75
+local DEFAULT_HATCH_EGG = "4x Luck Egg"
+local HATCH_DELAY = tonumber(Config.HATCH_DELAY) or 0.05
+if HATCH_DELAY <= 0 then HATCH_DELAY = 0.05 end
+
 local eggButtons = {}
 
 local running = false
@@ -94,6 +98,9 @@ local eSpamming = false
 local autoEnchanting = false
 local autoPermanentShrine = false
 local autoTimedShrines = false
+local autoSeasonPass = false
+local autoPresentRain = false
+local autoQuesting = false
 local uiVisible = true
 local scriptActive = true
 
@@ -102,6 +109,7 @@ local selectedEgg = Config.SELECTED_EGG
 local startTime = os.time()
 
 local hatchThread, teleportThread, eSpamThread, enchantThread, permShrineThread, timedShrineThread
+local seasonPassThread, presentRainThread, autoQuestThread
 local loopThreads = {}
 local webhookQueue = {}
 local webhookProcessing = false
@@ -111,41 +119,36 @@ local connections = {}
 -- UI declaration forward references
 local eggScroll, eggLayout, questScroll, questLayout
 
--- Generates the UI elements from the hardcoded positions list
-local function populateEggUI()
+-- Generates interface selection rows directly from the hardcoded coordinate lookups
+local function buildStaticEggUI()
     if not eggScroll then return end
     
-    -- Clear out old listings to prevent overlap
-    for _, btn in pairs(eggButtons) do btn:Destroy() end
-    table.clear(eggButtons)
+    local sortedNames = {}
+    for eggName in pairs(EGGS) do table.insert(sortedNames, eggName) end
+    table.sort(sortedNames)
 
-    -- Sort eggs alphabetically for a cleaner interface
-    local sortedEggNames = {}
-    for eggName, _ in pairs(EGGS) do
-        table.insert(sortedEggNames, eggName)
-    end
-    table.sort(sortedEggNames)
-
-    for _, eggName in ipairs(sortedEggNames) do
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, -6, 0, 26)
-        b.BackgroundColor3 = (selectedEgg == eggName) and Color3.fromRGB(0, 120, 200) or Color3.fromRGB(34, 34, 40)
-        b.TextColor3 = Color3.fromRGB(230, 230, 240)
-        b.Text = "   " .. eggName
-        b.Font = Enum.Font.GothamMedium
-        b.TextSize = 11
-        b.BorderSizePixel = 0
-        b.TextXAlignment = Enum.TextXAlignment.Left
-        b.Parent = eggScroll
-        eggButtons[eggName] = b
-        
-        b.MouseButton1Click:Connect(function()
-            for _, btn in pairs(eggButtons) do btn.BackgroundColor3 = Color3.fromRGB(34, 34, 40) end
-            selectedEgg = eggName
-            Config.SELECTED_EGG = eggName
-            saveConfig()
-            b.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
-        end)
+    for _, name in ipairs(sortedNames) do
+        if not eggButtons[name] then
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, -6, 0, 26)
+            b.BackgroundColor3 = (selectedEgg == name) and Color3.fromRGB(0, 120, 200) or Color3.fromRGB(34, 34, 40)
+            b.TextColor3 = Color3.fromRGB(230, 230, 240)
+            b.Text = "   " .. name
+            b.Font = Enum.Font.GothamMedium
+            b.TextSize = 11
+            b.BorderSizePixel = 0
+            b.TextXAlignment = Enum.TextXAlignment.Left
+            b.Parent = eggScroll
+            eggButtons[name] = b
+            
+            b.MouseButton1Click:Connect(function()
+                for _, btn in pairs(eggButtons) do btn.BackgroundColor3 = Color3.fromRGB(34, 34, 40) end
+                selectedEgg = name
+                Config.SELECTED_EGG = name
+                saveConfig()
+                b.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+            end)
+        end
     end
     eggScroll.CanvasSize = UDim2.new(0, 0, 0, eggLayout.AbsoluteContentSize.Y + 5)
 end
@@ -186,8 +189,13 @@ end
 
 local function getChanceText(petName)
     if not petName then return "1 in 1" end
+    
+    local reqFunc = request or http_request or (syn and syn.request)
+    if not reqFunc then return "1 in 1" end
+
     local url = "https://api.bgsi.gg/api/items/" .. cleanPetSlug(petName)
-    local ok, response = pcall(function() return safeRequest({ Url = url, Method = "GET" }) end)
+    local ok, response = pcall(function() return reqFunc({ Url = url, Method = "GET" }) end)
+    
     if ok and response and response.StatusCode == 200 then
         local rawData = HttpService:JSONDecode(response.Body)
         if rawData and rawData.pet and rawData.pet.chance then
@@ -281,366 +289,640 @@ local function buildAndQueueEmbed(rawPetName, petData, extras)
 end
 
 -- ======================================
---   UNBRANDED MODERN INTERFACE
+--   RAYFIELD INTERFACE
 -- ======================================
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "CleanHubUI"
-screenGui.ResetOnSpawn = false
-screenGui.Parent = LocalPlayer.PlayerGui
+local Rayfield
+local Window
+local screenGui
+local frame
+local counterLabel
+local rateLabel
+local hatchBtn
+local teleportBtn
+local eSpamBtn
+local savePosBtn
+local seasonPassBtn
+local presentRainBtn
+local enchantBtn
+local permItemInput
+local permTierInput
+local permAmtInput
+local permEggInput
+local togglePermShrineBtn
+local timedTypeInput
+local timedNameInput
+local timedTierInput
+local timedAmtInput
+local timedDreamInput
+local toggleTimedShrineBtn
+local webUrlInput
+local pingIdInput
+local testWebBtn
+local autoQuestBtn
+local fpsInput
+local bindBtn
+local exitBtn
+local questParagraph
+local selectedEggLabel
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 560, 0, 390)
-frame.Position = UDim2.new(0.3, 0, 0.25, 0)
-frame.BackgroundColor3 = Color3.fromRGB(32, 32, 36)
-frame.BorderSizePixel = 0
-frame.Parent = screenGui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 9)
-
-local sidebar = Instance.new("Frame")
-sidebar.Size = UDim2.new(0, 140, 1, 0)
-sidebar.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-sidebar.BorderSizePixel = 0
-sidebar.Parent = frame
-local sbCorner = Instance.new("UICorner", sidebar)
-sbCorner.CornerRadius = UDim.new(0, 9)
-
-local sbPatch = Instance.new("Frame")
-sbPatch.Size = UDim2.new(0, 15, 1, 0)
-sbPatch.Position = UDim2.new(1, -15, 0, 0)
-sbPatch.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-sbPatch.BorderSizePixel = 0
-sbPatch.Parent = sidebar
-
-local logoLabel = Instance.new("TextLabel")
-logoLabel.Size = UDim2.new(1, 0, 0, 50)
-logoLabel.BackgroundTransparency = 1
-logoLabel.Text = "" 
-logoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-logoLabel.Font = Enum.Font.GothamBold
-logoLabel.TextSize = 13
-logoLabel.Parent = sidebar
-
-local navList = Instance.new("Frame")
-navList.Size = UDim2.new(1, 0, 1, -60)
-navList.Position = UDim2.new(0, 0, 0, 50)
-navList.BackgroundTransparency = 1
-navList.Parent = sidebar
-
-local navLayout = Instance.new("UIListLayout")
-navLayout.Padding = UDim.new(0, 4)
-navLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-navLayout.Parent = navList
-
-local function createSideNavButton(name, iconText)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 125, 0, 34)
-    btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-    btn.TextColor3 = Color3.fromRGB(155, 155, 165)
-    btn.Text = "  " .. iconText .. "  " .. name
-    btn.Font = Enum.Font.GothamMedium
-    btn.TextSize = 12
-    btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.BorderSizePixel = 0
-    btn.Parent = navList
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
-    return btn
-end
-
-local mainTabBtn    = createSideNavButton("Main", "🏠")
-local eggTabBtn     = createSideNavButton("Eggs", "🥚")
-local enchantTabBtn = createSideNavButton("Enchant", "🔮")
-local questsTabBtn  = createSideNavButton("Quests", "📜")
-local shrineTabBtn  = createSideNavButton("Shrines", "⛩️")
-local settingsTabBtn= createSideNavButton("Settings", "⚙️")
-
-local contentPane = Instance.new("Frame")
-contentPane.Size = UDim2.new(1, -155, 1, -20)
-contentPane.Position = UDim2.new(0, 147, 0, 10)
-contentPane.BackgroundTransparency = 1
-contentPane.Parent = frame
-
-local function createViewPage()
-    local p = Instance.new("ScrollingFrame")
-    p.Size = UDim2.new(1, 0, 1, 0)
-    p.BackgroundTransparency = 1
-    p.BorderSizePixel = 0
-    p.ScrollBarThickness = 4
-    p.Visible = false
-    p.Parent = contentPane
-    
-    local layout = Instance.new("UIListLayout")
-    layout.Padding = UDim.new(0, 8)
-    layout.SortOrder = Enum.SortOrder.LayoutOrder
-    layout.Parent = p
-    
-    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        p.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
-    end)
-    
-    return p
-end
-
-local mainPage     = createViewPage()
-local eggPage      = createViewPage()
-local enchantPage  = createViewPage()
-local questsPage   = createViewPage()
-local shrinePage   = createViewPage()
-local settingsPage = createViewPage()
-
-local function switchTab(activePage, activeBtn)
-    mainPage.Visible, eggPage.Visible, enchantPage.Visible, questsPage.Visible, shrinePage.Visible, settingsPage.Visible = false, false, false, false, false, false
-    
-    local buttons = {mainTabBtn, eggTabBtn, enchantTabBtn, questsTabBtn, shrineTabBtn, settingsTabBtn}
-    for _, btn in ipairs(buttons) do
-        btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-        btn.TextColor3 = Color3.fromRGB(155, 155, 165)
+local function makeSignal()
+    local signal = { _callbacks = {} }
+    function signal:Connect(callback)
+        if type(callback) ~= "function" then
+            return { Disconnect = function() end }
+        end
+        table.insert(self._callbacks, callback)
+        local disconnected = false
+        return {
+            Disconnect = function()
+                if disconnected then return end
+                disconnected = true
+                for i, fn in ipairs(signal._callbacks) do
+                    if fn == callback then
+                        table.remove(signal._callbacks, i)
+                        break
+                    end
+                end
+            end
+        }
     end
-    
-    activePage.Visible = true
-    activeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
-    activeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-end
-
-mainTabBtn.MouseButton1Click:Connect(function() switchTab(mainPage, mainTabBtn) end)
-eggTabBtn.MouseButton1Click:Connect(function() switchTab(eggPage, eggTabBtn) end)
-enchantTabBtn.MouseButton1Click:Connect(function() switchTab(enchantPage, enchantTabBtn) end)
-questsTabBtn.MouseButton1Click:Connect(function() switchTab(questsPage, questsTabBtn) end)
-shrineTabBtn.MouseButton1Click:Connect(function() switchTab(shrinePage, shrineTabBtn) end)
-settingsTabBtn.MouseButton1Click:Connect(function() switchTab(settingsPage, settingsTabBtn) end)
-
--- ======================================
---   COMPACT CONTENT CARD SUB-PANELS
--- ======================================
-local function createSectionCard(titleText, parent, height)
-    local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -6, 0, height or 110)
-    card.BackgroundColor3 = Color3.fromRGB(27, 27, 30)
-    card.BorderSizePixel = 0
-    card.Parent = parent
-    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
-    
-    local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size = UDim2.new(1, -12, 0, 24)
-    titleLbl.Position = UDim2.new(0, 8, 0, 2)
-    titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = titleText
-    titleLbl.TextColor3 = Color3.fromRGB(140, 140, 150)
-    titleLbl.Font = Enum.Font.GothamBold
-    titleLbl.TextSize = 10
-    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-    titleLbl.Parent = card
-    
-    local container = Instance.new("Frame")
-    container.Size = UDim2.new(1, -16, 1, -28)
-    container.Position = UDim2.new(0, 8, 0, 24)
-    container.BackgroundTransparency = 1
-    container.Parent = card
-    
-    local layout = Instance.new("UIListLayout")
-    layout.Padding = UDim.new(0, 6)
-    layout.Parent = container
-    
-    return container
-end
-
-local function createFormRowInput(labelStr, placeholder, default, parent)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 28)
-    row.BackgroundTransparency = 1
-    row.Parent = parent
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0, 120, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = labelStr
-    lbl.TextColor3 = Color3.fromRGB(175, 175, 185)
-    lbl.Font = Enum.Font.GothamMedium
-    lbl.TextSize = 11
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-    
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(1, -125, 1, 0)
-    box.Position = UDim2.new(0, 125, 0, 0)
-    box.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
-    box.TextColor3 = Color3.fromRGB(255, 255, 255)
-    box.PlaceholderText = placeholder
-    box.Text = default
-    box.Font = Enum.Font.Gotham
-    box.TextSize = 11
-    box.BorderSizePixel = 0
-    box.ClearTextOnFocus = false
-    box.Parent = row
-    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
-    
-    return box
-end
-
-local function createToggleBtn(text, color, parent)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 30)
-    btn.BackgroundColor3 = color
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.Text = text
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 11
-    btn.BorderSizePixel = 0
-    btn.Parent = parent
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
-    return btn
-end
-
--- ======================================
---   MAIN PAGE PANEL
--- ======================================
-local statsCard = createSectionCard("MONITOR STATISTICS", mainPage, 65)
-local counterLabel = Instance.new("TextLabel")
-counterLabel.Size = UDim2.new(1, 0, 0, 14)
-counterLabel.BackgroundTransparency = 1
-counterLabel.Text = "Eggs Hatched: 0"
-counterLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-counterLabel.Font = Enum.Font.GothamMedium
-counterLabel.TextSize = 12
-counterLabel.TextXAlignment = Enum.TextXAlignment.Left
-counterLabel.Parent = statsCard
-
-local rateLabel = Instance.new("TextLabel")
-rateLabel.Size = UDim2.new(1, 0, 0, 14)
-rateLabel.BackgroundTransparency = 1
-rateLabel.Text = "Hatch Rate: 0 / m"
-rateLabel.TextColor3 = Color3.fromRGB(130, 170, 230)
-rateLabel.Font = Enum.Font.GothamMedium
-rateLabel.TextSize = 11
-rateLabel.TextXAlignment = Enum.TextXAlignment.Left
-rateLabel.Parent = statsCard
-
-local loopCard = createSectionCard("AUTOMATION CONTROLS", mainPage, 135)
-local hatchBtn     = createToggleBtn("Auto Hatch Core: OFF", Color3.fromRGB(38, 38, 44), loopCard)
-local teleportBtn  = createToggleBtn("Teleport Loop: OFF", Color3.fromRGB(38, 38, 44), loopCard)
-local eSpamBtn     = createToggleBtn("Key E Spam: OFF", Color3.fromRGB(38, 38, 44), loopCard)
-
-local extraCard = createSectionCard("SQUAD POSITIONING", mainPage, 65)
-local savePosBtn   = createToggleBtn("Save Position Anchor", Color3.fromRGB(80, 70, 105), extraCard)
-
--- ======================================
---   EGGS SELECTION PAGE
--- ======================================
-local selectionCard = createSectionCard("HARDCODED CHOSEN EGGS", eggPage, 330)
-
-eggScroll = Instance.new("ScrollingFrame")
-eggScroll.Size = UDim2.new(1, 0, 1, -4)
-eggScroll.BackgroundTransparency = 1
-eggScroll.ScrollBarThickness = 3
-eggScroll.BorderSizePixel = 0
-eggScroll.Parent = selectionCard
-
-eggLayout = Instance.new("UIListLayout")
-eggLayout.Padding = UDim.new(0, 3)
-eggLayout.Parent = eggScroll
-
--- Build list instantly from positions table
-populateEggUI()
-
--- ======================================
---   ENCHANT CONFIGURATIONS PAGE
--- ======================================
-local enchantCard = createSectionCard("ENCHANT CONFIGURATIONS", enchantPage, 90)
-local enchantBtn = createToggleBtn("Auto Enchant Squad: OFF", Color3.fromRGB(38, 38, 44), enchantCard)
-
--- ======================================
---   QUEST MANAGEMENT PAGE
--- ======================================
-local questsCard = createSectionCard("ACTIVE TRACKED QUESTS", questsPage, 330)
-
-questScroll = Instance.new("ScrollingFrame")
-questScroll.Size = UDim2.new(1, 0, 1, -4)
-questScroll.BackgroundTransparency = 1
-questScroll.ScrollBarThickness = 3
-questScroll.BorderSizePixel = 0
-questScroll.Parent = questsCard
-
-questLayout = Instance.new("UIListLayout")
-questLayout.Padding = UDim.new(0, 5)
-questLayout.Parent = questScroll
-
-local function updateQuestDisplay()
-    if not scriptActive or not questScroll then return end
-    questScroll:ClearAllChildren()
-    
-    local layout = Instance.new("UIListLayout")
-    layout.Padding = UDim.new(0, 5)
-    layout.Parent = questScroll
-
-    local data = LocalData:Get()
-    if data and data.Quests then
-        for qName, qData in pairs(data.Quests) do
-            local row = Instance.new("Frame")
-            row.Size = UDim2.new(1, -6, 0, 36)
-            row.BackgroundColor3 = Color3.fromRGB(34, 34, 40)
-            row.BorderSizePixel = 0
-            row.Parent = questScroll
-            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(1, -12, 1, 0)
-            lbl.Position = UDim2.new(0, 6, 0, 0)
-            lbl.BackgroundTransparency = 1
-            lbl.TextColor3 = Color3.fromRGB(230, 230, 240)
-            lbl.Font = Enum.Font.GothamMedium
-            lbl.TextSize = 11
-            lbl.TextXAlignment = Enum.TextXAlignment.Left
-            lbl.Parent = row
-
-            local currentVal = qData.Amount or 0
-            local targetVal = qData.Target or 1
-            lbl.Text = tostring(qName) .. ": " .. formatCommas(currentVal) .. " / " .. formatCommas(targetVal)
+    function signal:Fire(...)
+        for _, callback in ipairs(self._callbacks) do
+            task.spawn(callback, ...)
         end
     end
-    questScroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 5)
+    return signal
+end
+
+local function protectCall(fn)
+    local ok, result = pcall(fn)
+    if ok then return result end
+    warn(result)
+    return nil
+end
+
+local function createButtonProxy(tab, name)
+    local clicked = makeSignal()
+    local proxy = {
+        _text = name,
+        _element = nil,
+        MouseButton1Click = clicked
+    }
+
+    proxy._element = protectCall(function()
+        return tab:CreateButton({
+            Name = name,
+            Callback = function()
+                clicked:Fire()
+            end,
+        })
+    end)
+
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then
+                return rawget(self, "_text")
+            end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then
+                rawset(self, "_text", tostring(value or ""))
+                if self._element and self._element.Set then
+                    pcall(function() self._element:Set(rawget(self, "_text")) end)
+                end
+            elseif key == "BackgroundColor3" then
+                rawset(self, key, value)
+            else
+                rawset(self, key, value)
+            end
+        end
+    })
+end
+
+local function createInputProxy(tab, name, current, placeholder, flag)
+    local focusLost = makeSignal()
+    local proxy = {
+        _text = tostring(current or ""),
+        _element = nil,
+        FocusLost = focusLost
+    }
+
+    proxy._element = protectCall(function()
+        return tab:CreateInput({
+            Name = name,
+            CurrentValue = proxy._text,
+            PlaceholderText = placeholder or "",
+            RemoveTextAfterFocusLost = false,
+            Flag = flag,
+            Callback = function(text)
+                proxy._text = tostring(text or "")
+                focusLost:Fire()
+            end,
+        })
+    end)
+
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then
+                return rawget(self, "_text")
+            end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then
+                rawset(self, "_text", tostring(value or ""))
+                if self._element and self._element.Set then
+                    pcall(function() self._element:Set(rawget(self, "_text")) end)
+                end
+            else
+                rawset(self, key, value)
+            end
+        end
+    })
+end
+
+local function createLabelProxy(tab, text)
+    local proxy = {
+        _text = tostring(text or ""),
+        _element = nil
+    }
+
+    proxy._element = protectCall(function()
+        return tab:CreateLabel(proxy._text)
+    end)
+
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then
+                return rawget(self, "_text")
+            end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then
+                rawset(self, "_text", tostring(value or ""))
+                if self._element and self._element.Set then
+                    pcall(function() self._element:Set(rawget(self, "_text")) end)
+                end
+            else
+                rawset(self, key, value)
+            end
+        end
+    })
+end
+
+local function rayNotify(title, content, duration)
+    if Rayfield and Rayfield.Notify then
+        pcall(function()
+            Rayfield:Notify({
+                Title = title or "Notice",
+                Content = content or "",
+                Duration = duration or 4,
+            })
+        end)
+    end
+end
+
+local function buildEggList()
+    local names = {}
+    for eggName in pairs(EGGS) do
+        table.insert(names, eggName)
+    end
+    table.sort(names)
+    return names
+end
+
+local function createFallbackButton(name)
+    local clicked = makeSignal()
+    local proxy = { _text = name, MouseButton1Click = clicked }
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then return rawget(self, "_text") end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then rawset(self, "_text", tostring(value or "")) else rawset(self, key, value) end
+        end
+    })
+end
+
+local function createFallbackInput(current)
+    local focusLost = makeSignal()
+    local proxy = { _text = tostring(current or ""), FocusLost = focusLost }
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then return rawget(self, "_text") end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then rawset(self, "_text", tostring(value or "")); focusLost:Fire() else rawset(self, key, value) end
+        end
+    })
+end
+
+local function createFallbackLabel(text)
+    local proxy = { _text = tostring(text or "") }
+    return setmetatable(proxy, {
+        __index = function(self, key)
+            if key == "Text" then return rawget(self, "_text") end
+            return rawget(self, key)
+        end,
+        __newindex = function(self, key, value)
+            if key == "Text" then rawset(self, "_text", tostring(value or "")) else rawset(self, key, value) end
+        end
+    })
+end
+
+local rayfieldOk = pcall(function()
+    Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+end)
+
+local function getRayfieldToggleKeybind()
+    local keyName = tostring(Config.TOGGLE_KEY or "RightShift")
+    local ok, keyCode = pcall(function()
+        return Enum.KeyCode[keyName]
+    end)
+
+    if ok and typeof(keyCode) == "EnumItem" then
+        return keyCode
+    end
+
+    Config.TOGGLE_KEY = "RightShift"
+    saveConfig()
+    return Enum.KeyCode.RightShift
+end
+
+local rayfieldWindowOk = false
+
+if rayfieldOk and Rayfield then
+    local createdWindow
+    rayfieldWindowOk, createdWindow = pcall(function()
+        return Rayfield:CreateWindow({
+        Name = "@76yx",
+        Icon = 0,
+        LoadingTitle = "@76yx",
+        LoadingSubtitle = "",
+        ShowText = "@76yx",
+        Theme = {
+            TextColor = Color3.fromRGB(235, 235, 235),
+            Background = Color3.fromRGB(18, 18, 18),
+            Topbar = Color3.fromRGB(28, 28, 28),
+            Shadow = Color3.fromRGB(10, 10, 10),
+            NotificationBackground = Color3.fromRGB(22, 22, 22),
+            NotificationActionsBackground = Color3.fromRGB(42, 42, 42),
+            TabBackground = Color3.fromRGB(30, 30, 30),
+            TabStroke = Color3.fromRGB(48, 48, 48),
+            TabBackgroundSelected = Color3.fromRGB(42, 42, 42),
+            TabTextColor = Color3.fromRGB(190, 190, 190),
+            SelectedTabTextColor = Color3.fromRGB(255, 255, 255),
+            ElementBackground = Color3.fromRGB(27, 27, 27),
+            ElementBackgroundHover = Color3.fromRGB(34, 34, 34),
+            SecondaryElementBackground = Color3.fromRGB(22, 22, 22),
+            ElementStroke = Color3.fromRGB(50, 50, 50),
+            SecondaryElementStroke = Color3.fromRGB(42, 42, 42),
+            SliderBackground = Color3.fromRGB(70, 110, 170),
+            SliderProgress = Color3.fromRGB(80, 130, 200),
+            SliderStroke = Color3.fromRGB(90, 145, 220),
+            ToggleBackground = Color3.fromRGB(25, 25, 25),
+            ToggleEnabled = Color3.fromRGB(55, 150, 95),
+            ToggleDisabled = Color3.fromRGB(90, 90, 90),
+            ToggleEnabledStroke = Color3.fromRGB(70, 175, 115),
+            ToggleDisabledStroke = Color3.fromRGB(110, 110, 110),
+            ToggleEnabledOuterStroke = Color3.fromRGB(70, 70, 70),
+            ToggleDisabledOuterStroke = Color3.fromRGB(55, 55, 55),
+            DropdownSelected = Color3.fromRGB(34, 34, 34),
+            DropdownUnselected = Color3.fromRGB(25, 25, 25),
+            InputBackground = Color3.fromRGB(24, 24, 24),
+            InputStroke = Color3.fromRGB(58, 58, 58),
+            PlaceholderColor = Color3.fromRGB(145, 145, 145)
+        },
+        ToggleUIKeybind = getRayfieldToggleKeybind(),
+        DisableRayfieldPrompts = true,
+        DisableBuildWarnings = true,
+        ConfigurationSaving = {
+            Enabled = false,
+            FolderName = nil,
+            FileName = "UtilityPanel"
+        },
+        Discord = {
+            Enabled = false,
+            Invite = "",
+            RememberJoins = true
+        },
+        KeySystem = false
+        })
+    end)
+
+    if rayfieldWindowOk then
+        Window = createdWindow
+    else
+        warn("Rayfield CreateWindow failed. Falling back to safe proxy controls.", tostring(createdWindow))
+    end
+end
+
+if rayfieldOk and Rayfield and rayfieldWindowOk and Window then
+    local Tabs = {
+        Stats = Window:CreateTab("Stats", 0),
+        Main = Window:CreateTab("Main", 0),
+        Eggs = Window:CreateTab("Eggs", 0),
+        Event = Window:CreateTab("Event", 0),
+        Enchant = Window:CreateTab("Enchant", 0),
+        Quests = Window:CreateTab("Quests", 0),
+        Shrines = Window:CreateTab("Shrines", 0),
+        Settings = Window:CreateTab("Settings", 0)
+    }
+
+    Tabs.Stats:CreateSection("Hatch Monitor")
+    counterLabel = createLabelProxy(Tabs.Stats, "Eggs Hatched: 0")
+    rateLabel = createLabelProxy(Tabs.Stats, "Hatch Rate: 0 / m")
+    selectedEggLabel = createLabelProxy(Tabs.Stats, "Selected Egg: " .. tostring(selectedEgg or "None"))
+
+    Tabs.Main:CreateSection("Automation")
+    hatchBtn = createButtonProxy(Tabs.Main, "Auto Hatch Core: OFF")
+    teleportBtn = createButtonProxy(Tabs.Main, "Teleport Loop: OFF")
+    eSpamBtn = createButtonProxy(Tabs.Main, "Key E Spam: OFF")
+    Tabs.Main:CreateDivider()
+    Tabs.Main:CreateSection("Position")
+    savePosBtn = createButtonProxy(Tabs.Main, "Save Position Anchor")
+
+    Tabs.Eggs:CreateSection("Egg Selection")
+    local eggNames = buildEggList()
+    createLabelProxy(Tabs.Eggs, "Click an egg below to select it.")
+
+    for _, eggName in ipairs(eggNames) do
+        local eggButton = createButtonProxy(Tabs.Eggs, eggName)
+        eggButtons[eggName] = eggButton
+        eggButton.MouseButton1Click:Connect(function()
+            selectedEgg = eggName
+            Config.SELECTED_EGG = eggName
+            saveConfig()
+            if selectedEggLabel then
+                selectedEggLabel.Text = "Selected Egg: " .. tostring(eggName)
+            end
+            rayNotify("Egg Selected", eggName, 2)
+        end)
+    end
+
+    Tabs.Event:CreateSection("Event")
+    seasonPassBtn = createButtonProxy(Tabs.Event, "Auto Claim Season Pass: OFF")
+    presentRainBtn = createButtonProxy(Tabs.Event, "Collect Present Rain: OFF")
+
+    Tabs.Enchant:CreateSection("Enchant")
+    enchantBtn = createButtonProxy(Tabs.Enchant, "Auto Enchant Squad: OFF")
+
+    Tabs.Quests:CreateSection("Challenge Pass")
+    autoQuestBtn = createButtonProxy(Tabs.Quests, "Auto Quest: OFF")
+    questParagraph = Tabs.Quests:CreateParagraph({
+        Title = "Challenge Pass Quests",
+        Content = "Open Challenge Pass UI to load quests."
+    })
+
+    Tabs.Shrines:CreateSection("Permanent Shrine")
+    permItemInput = createInputProxy(Tabs.Shrines, "Donation Type", "Lucky", "Lucky / Potion", "PermanentShrine_Item")
+    permTierInput = createInputProxy(Tabs.Shrines, "Rarity Tier", "6", "Item Tier", "PermanentShrine_Tier")
+    permAmtInput = createInputProxy(Tabs.Shrines, "Sacrifice Qty", "400", "Quantity", "PermanentShrine_Amount")
+    permEggInput = createInputProxy(Tabs.Shrines, "Buff Target Egg", "Common Egg", "Egg Name", "PermanentShrine_Egg")
+    togglePermShrineBtn = createButtonProxy(Tabs.Shrines, "Permanent Shrine: OFF")
+
+    Tabs.Shrines:CreateDivider()
+    Tabs.Shrines:CreateSection("Timed Shrines")
+    timedTypeInput = createInputProxy(Tabs.Shrines, "Bubble Gift Type", "Potion", "Potion / Pet", "TimedShrine_Type")
+    timedNameInput = createInputProxy(Tabs.Shrines, "Bubble Item Id", "Lucky", "Item Name", "TimedShrine_Name")
+    timedTierInput = createInputProxy(Tabs.Shrines, "Bubble Item Tier", "1", "Level Tier", "TimedShrine_Tier")
+    timedAmtInput = createInputProxy(Tabs.Shrines, "Bubble Item Qty", "500", "Sacrifice Qty", "TimedShrine_Amount")
+    timedDreamInput = createInputProxy(Tabs.Shrines, "Dreamer Dust Qty", "15", "Dust Qty", "TimedShrine_Dreamer")
+    toggleTimedShrineBtn = createButtonProxy(Tabs.Shrines, "Automate Timed Shrines: OFF")
+
+    Tabs.Settings:CreateSection("Webhook")
+    webUrlInput = createInputProxy(Tabs.Settings, "Webhook URL", Config.WEBHOOK_URL, "Discord Webhook URL", "WebhookURL_Input")
+    pingIdInput = createInputProxy(Tabs.Settings, "Ping User ID", Config.DISCORD_PING_ID, "Discord User ID", "PingID_Input")
+    testWebBtn = createButtonProxy(Tabs.Settings, "Send Integration Test Link")
+
+    Tabs.Settings:CreateDivider()
+    Tabs.Settings:CreateSection("Client")
+    fpsInput = createInputProxy(Tabs.Settings, "FPS Cap", Config.FPS_CAP, "FPS Target", "FPSCap_Input")
+    bindBtn = createButtonProxy(Tabs.Settings, "Current Bind: " .. Config.TOGGLE_KEY)
+
+    Tabs.Settings:CreateDivider()
+    Tabs.Settings:CreateSection("Session")
+    exitBtn = createButtonProxy(Tabs.Settings, "End Script Session")
+else
+    warn("Rayfield failed to load. UI controls were not created.")
+    counterLabel = createFallbackLabel("Eggs Hatched: 0")
+    rateLabel = createFallbackLabel("Hatch Rate: 0 / m")
+    hatchBtn = createFallbackButton("Auto Hatch Core: OFF")
+    teleportBtn = createFallbackButton("Teleport Loop: OFF")
+    eSpamBtn = createFallbackButton("Key E Spam: OFF")
+    savePosBtn = createFallbackButton("Save Position Anchor")
+    seasonPassBtn = createFallbackButton("Auto Claim Season Pass: OFF")
+    presentRainBtn = createFallbackButton("Collect Present Rain: OFF")
+    enchantBtn = createFallbackButton("Auto Enchant Squad: OFF")
+    permItemInput = createFallbackInput("Lucky")
+    permTierInput = createFallbackInput("6")
+    permAmtInput = createFallbackInput("400")
+    permEggInput = createFallbackInput("Common Egg")
+    togglePermShrineBtn = createFallbackButton("Permanent Shrine: OFF")
+    timedTypeInput = createFallbackInput("Potion")
+    timedNameInput = createFallbackInput("Lucky")
+    timedTierInput = createFallbackInput("1")
+    timedAmtInput = createFallbackInput("500")
+    timedDreamInput = createFallbackInput("15")
+    toggleTimedShrineBtn = createFallbackButton("Automate Timed Shrines: OFF")
+    webUrlInput = createFallbackInput(Config.WEBHOOK_URL)
+    pingIdInput = createFallbackInput(Config.DISCORD_PING_ID)
+    testWebBtn = createFallbackButton("Send Integration Test Link")
+    autoQuestBtn = createFallbackButton("Auto Quest: OFF")
+    fpsInput = createFallbackInput(Config.FPS_CAP)
+    bindBtn = createFallbackButton("Current Bind: " .. Config.TOGGLE_KEY)
+    exitBtn = createFallbackButton("End Script Session")
+end
+
+screenGui = {
+    Destroy = function()
+        if Rayfield and Rayfield.Destroy then
+            pcall(function() Rayfield:Destroy() end)
+        end
+    end
+}
+
+frame = setmetatable({ _visible = true }, {
+    __index = function(self, key)
+        if key == "Visible" then
+            return rawget(self, "_visible")
+        end
+        return rawget(self, key)
+    end,
+    __newindex = function(self, key, value)
+        if key == "Visible" then
+            rawset(self, "_visible", value and true or false)
+            if Rayfield and Rayfield.SetVisibility then
+                pcall(function() Rayfield:SetVisibility(rawget(self, "_visible")) end)
+            end
+        else
+            rawset(self, key, value)
+        end
+    end
+})
+
+-- ======================================
+--   CHALLENGE PASS QUEST READER
+-- ======================================
+local function getChallengePassGui()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local sg = pg:FindFirstChild("ScreenGui")
+    return sg and sg:FindFirstChild("ChallengePass")
+end
+
+local function getQuestLabel(challengeFrame)
+    local content = challengeFrame and challengeFrame:FindFirstChild("Content")
+    if content then
+        local lbl = content:FindFirstChild("Label")
+        if lbl then return lbl.Text end
+    end
+    return nil
+end
+
+local function isQuestCompleted(challengeFrame)
+    local completed = challengeFrame and challengeFrame:FindFirstChild("Completed")
+    return completed and completed.Visible == true
+end
+
+local function getQuestFillPct(challengeFrame)
+    local ok, fill = pcall(function()
+        return challengeFrame.Content.Bar.Fill
+    end)
+    if ok and fill then
+        return math.clamp(tonumber(fill.Size.X.Scale) or 0, 0, 1)
+    end
+    return 0
+end
+
+local function parseQuestText(text)
+    if not text then return nil end
+    text = tostring(text):gsub(",", "")
+
+    local blowAmount = text:match("^Blow (%d+) Bubbles$")
+    if blowAmount then
+        return { type = "Blow", amount = tonumber(blowAmount) }
+    end
+
+    local playMins = text:match("[Pp]lay.+(%d+).+[Mm]in")
+    if playMins then
+        return { type = "Playtime", amount = tonumber(playMins) }
+    end
+
+    local genericAmount = text:match("^Hatch (%d+) Eggs$")
+    if genericAmount then
+        return { type = "Hatch", amount = tonumber(genericAmount), egg = DEFAULT_HATCH_EGG }
+    end
+
+    local hatchAmount, eggName = text:match("^Hatch (%d+) (.+) Eggs$")
+    if hatchAmount and eggName then
+        return { type = "Hatch", amount = tonumber(hatchAmount), egg = eggName .. " Egg" }
+    end
+
+    return nil
+end
+
+local function getActiveChallenges()
+    local cpGui = getChallengePassGui()
+    if not cpGui then return {} end
+
+    local ok, list = pcall(function()
+        return cpGui.Frame.Challenges.List
+    end)
+    if not ok or not list then return {} end
+
+    local challenges = {}
+    for _, child in ipairs(list:GetChildren()) do
+        if child:IsA("Frame") and tostring(child.Name):find("bubble%-challenge") then
+            local labelText = getQuestLabel(child)
+            local parsed = parseQuestText(labelText)
+            if parsed then
+                table.insert(challenges, {
+                    frame = child,
+                    text = labelText,
+                    completed = isQuestCompleted(child),
+                    quest = parsed
+                })
+            end
+        end
+    end
+    return challenges
+end
+
+local function allQuestsCompleted(challenges)
+    if #challenges == 0 then return false end
+    for _, c in ipairs(challenges) do
+        if not isQuestCompleted(c.frame) and getQuestFillPct(c.frame) < 1 then
+            return false
+        end
+    end
+    return true
+end
+
+local function hasIncompleteChallengeQuests()
+    local challenges = getActiveChallenges()
+    if #challenges == 0 then return false end
+
+    for _, c in ipairs(challenges) do
+        if c and c.frame and not isQuestCompleted(c.frame) and getQuestFillPct(c.frame) < 1 then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function shouldHoldMainHatchForQuests()
+    -- Only let Challenge Pass quest work take priority when Auto Quest is enabled.
+    -- This prevents Auto Hatch / Teleport Loop from pulling you back to the selected egg
+    -- while the quest worker is trying to finish hatch, bubble, or playtime quests.
+    return autoQuesting and hasIncompleteChallengeQuests()
+end
+
+local function updateQuestDisplay()
+    if not scriptActive or not questParagraph then return end
+
+    local challenges = getActiveChallenges()
+    local lines = {}
+
+    if #challenges > 0 then
+        for i, c in ipairs(challenges) do
+            local pct = math.floor(getQuestFillPct(c.frame) * 100)
+            if isQuestCompleted(c.frame) or pct >= 100 then
+                table.insert(lines, "✅ " .. tostring(c.text or ("Quest " .. i)))
+            else
+                table.insert(lines, tostring(c.text or ("Quest " .. i)) .. " (" .. pct .. "%)")
+            end
+        end
+    else
+        local data = LocalData:Get()
+        if data and data.Quests then
+            for qName, qData in pairs(data.Quests) do
+                local currentVal = qData.Amount or 0
+                local targetVal = qData.Target or 1
+                table.insert(lines, tostring(qName) .. ": " .. formatCommas(currentVal) .. " / " .. formatCommas(targetVal))
+            end
+        end
+    end
+
+    if #lines == 0 then
+        table.insert(lines, "Open Challenge Pass UI to load quests.")
+    end
+
+    pcall(function()
+        questParagraph:Set({
+            Title = "Challenge Pass Quests",
+            Content = table.concat(lines, "\n")
+        })
+    end)
 end
 
 -- ======================================
---   SHRINES CONFIG PAGE
--- ======================================
-local permCard = createSectionCard("PERMANENT SHRINE BUFFS", shrinePage, 160)
-local permItemInput = createFormRowInput("Donation Type:", "Lucky / Potion", "Lucky", permCard)
-local permTierInput = createFormRowInput("Rarity Tier:", "Item Tier", "6", permCard)
-local permAmtInput  = createFormRowInput("Sacrifice Qty:", "Quantity", "400", permCard)
-local permEggInput  = createFormRowInput("Buff Target Egg:", "Egg Name", "Common Egg", permCard)
-local togglePermShrineBtn = createToggleBtn("Permanent Shrine: OFF", Color3.fromRGB(38, 38, 44), permCard)
-
-local timedCard = createSectionCard("TIMED SHRINE BUFFS", shrinePage, 185)
-local timedTypeInput = createFormRowInput("Bubble Gift Type:", "Potion / Pet", "Potion", timedCard)
-local timedNameInput = createFormRowInput("Bubble Item Id:", "Item Name", "Lucky", timedCard)
-local timedTierInput = createFormRowInput("Bubble Item Tier:", "Level Tier", "1", timedCard)
-local timedAmtInput  = createFormRowInput("Bubble Item Qty:", "Sacrifice Qty", "500", timedCard)
-local timedDreamInput = createFormRowInput("Dreamer Dust Qty:", "Dust Qty", "15", timedCard)
-local toggleTimedShrineBtn = createToggleBtn("Automate Timed Shrines: OFF", Color3.fromRGB(38, 38, 44), timedCard)
-
--- ======================================
---   SETTINGS & INTEGRATIONS PAGE
--- ======================================
-local urlCard = createSectionCard("INTEGRATION METRICS", settingsPage, 90)
-local webUrlInput = createFormRowInput("Webhook URL:", "Discord Link...", Config.WEBHOOK_URL, urlCard)
-local pingIdInput = createFormRowInput("Ping User ID:", "Discord Snowflake...", Config.DISCORD_PING_ID, urlCard)
-
-local diagnosticCard = createSectionCard("DIAGNOSTICS", settingsPage, 60)
-local testWebBtn = createToggleBtn("Send Integration Test Link", Color3.fromRGB(110, 60, 150), diagnosticCard)
-
-webUrlInput.FocusLost:Connect(function() Config.WEBHOOK_URL = webUrlInput.Text saveConfig() end)
-pingIdInput.FocusLost:Connect(function() Config.DISCORD_PING_ID = pingIdInput.Text saveConfig() end)
-
-local envCard = createSectionCard("HARDWARE PERFORMANCE", settingsPage, 60)
-local fpsInput = createFormRowInput("Limit Client FPS:", "FPS Target", Config.FPS_CAP, envCard)
-
-local keysCard = createSectionCard("KEYBIND MANAGER", settingsPage, 60)
-local bindBtn = createToggleBtn("Current Bind: " .. Config.TOGGLE_KEY, Color3.fromRGB(38, 38, 44), keysCard)
-
-local termCard = createSectionCard("TERMINATION", settingsPage, 60)
-local exitBtn = createToggleBtn("End Script Session", Color3.fromRGB(150, 40, 45), termCard)
-
--- ======================================
---   KEYBIND CONTEXT HANDLERS
+--   CORE INTERACTION AND SYSTEMS
 -- ======================================
 local listeningForBind = false
 bindBtn.MouseButton1Click:Connect(function()
@@ -659,12 +941,11 @@ local inputConnection = UserInputService.InputBegan:Connect(function(input, game
             saveConfig()
             bindBtn.Text = "Current Bind: " .. keyName
             bindBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
+            rayNotify("Keybind Saved", "Reload the script for the Rayfield toggle key to update.", 3)
         end
     else
-        if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name == Config.TOGGLE_KEY then
-            uiVisible = not uiVisible
-            frame.Visible = uiVisible
-        end
+        -- Rayfield owns UI visibility through ToggleUIKeybind.
+        -- Keeping a second manual visibility toggle here can desync the menu and prevent reopening.
     end
 end)
 table.insert(connections, inputConnection)
@@ -677,6 +958,9 @@ local function unloadScript()
     autoPermanentShrine = false
     autoTimedShrines = false
     autoEnchanting = false
+    autoSeasonPass = false
+    autoPresentRain = false
+    autoQuesting = false
     
     if hatchThread then pcall(function() task.cancel(hatchThread) end) end
     if teleportThread then pcall(function() task.cancel(teleportThread) end) end
@@ -684,6 +968,9 @@ local function unloadScript()
     if enchantThread then pcall(function() task.cancel(enchantThread) end) end
     if permShrineThread then pcall(function() task.cancel(permShrineThread) end) end
     if timedShrineThread then pcall(function() task.cancel(timedShrineThread) end) end
+    if seasonPassThread then pcall(function() task.cancel(seasonPassThread) end) end
+    if presentRainThread then pcall(function() task.cancel(presentRainThread) end) end
+    if autoQuestThread then pcall(function() task.cancel(autoQuestThread) end) end
     for _, t in ipairs(loopThreads) do pcall(function() task.cancel(t) end) end
     for _, c in ipairs(connections) do if c and c.Connected then c:Disconnect() end end
     
@@ -814,7 +1101,67 @@ enchantBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Shrine Executions
+-- ======================================
+--   SEASON PASS & PRESENT RAIN LOOPS
+-- ======================================
+seasonPassBtn.MouseButton1Click:Connect(function()
+    if autoSeasonPass then
+        autoSeasonPass = false
+        if seasonPassThread then task.cancel(seasonPassThread) seasonPassThread = nil end
+        seasonPassBtn.Text = "Auto Claim Season Pass: OFF"
+        seasonPassBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
+    else
+        autoSeasonPass = true
+        seasonPassBtn.Text = "Auto Claim Season Pass: ON"
+        seasonPassBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+        seasonPassThread = task.spawn(function()
+            while autoSeasonPass and scriptActive do
+                pcall(function()
+                    RemoteEvent:FireServer("ClaimSeason")
+                end)
+                task.wait(5)
+            end
+        end)
+    end
+end)
+
+local function scanAndCollectPresents()
+    local targetPool = Workspace:FindFirstChild("Rendered") or Workspace
+    for _, obj in ipairs(targetPool:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local nameLower = string.lower(obj.Name)
+            if string.find(nameLower, "present") or string.find(nameLower, "gift") or obj:GetAttribute("PresentId") then
+                local foundId = obj:GetAttribute("ID") or obj:GetAttribute("PresentId") or obj.Name
+                if foundId and #foundId >= 6 and foundId ~= "Present" then 
+                    pcall(function()
+                        RemoteEvent:FireServer("CollectPresentRain", tostring(foundId))
+                    end)
+                end
+            end
+        end
+    end
+end
+
+presentRainBtn.MouseButton1Click:Connect(function()
+    if autoPresentRain then
+        autoPresentRain = false
+        if presentRainThread then task.cancel(presentRainThread) presentRainThread = nil end
+        presentRainBtn.Text = "Collect Present Rain: OFF"
+        presentRainBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
+    else
+        autoPresentRain = true
+        presentRainBtn.Text = "Collect Present Rain: ON"
+        presentRainBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+        presentRainThread = task.spawn(function()
+            while autoPresentRain and scriptActive do
+                scanAndCollectPresents()
+                task.wait(1)
+            end
+        end)
+    end
+end)
+
+-- Shrines Executions
 local function loopPermanentShrineAction()
     local item = permItemInput.Text
     local tier = tonumber(permTierInput.Text) or 6
@@ -900,6 +1247,7 @@ for _, c in ipairs(LocalPlayer.PlayerGui:GetChildren()) do cleanHatchUI(c) end
 local uiConnection = LocalPlayer.PlayerGui.ChildAdded:Connect(cleanHatchUI)
 table.insert(connections, uiConnection)
 
+-- Hook structure targets the global metadata located within: ReplicatedStorage.Shared.Data.Pets
 local success, HatchingModule = pcall(function() return require(ReplicatedStorage.Client.Effects.HatchEgg) end)
 if success and HatchingModule and type(HatchingModule) == "table" and HatchingModule.Play then
     local originalPlay = HatchingModule.Play
@@ -937,7 +1285,9 @@ local function startTeleport()
     teleportBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
     teleportThread = task.spawn(function()
         while teleporting and scriptActive do 
-            if EGGS[selectedEgg] then teleportTo(EGGS[selectedEgg]) end
+            if not shouldHoldMainHatchForQuests() and EGGS[selectedEgg] then
+                teleportTo(EGGS[selectedEgg])
+            end
             task.wait(0.5) 
         end
     end)
@@ -958,22 +1308,23 @@ local function startHatch()
     setWalkSpeed(WALKSPEED)
     hatchThread = task.spawn(function()
         while running and scriptActive do
-            if EGGS[selectedEgg] then
-                -- Lock positioning
+            if shouldHoldMainHatchForQuests() then
+                -- Auto Quest owns teleporting/hatching until current Challenge Pass quests are complete.
+                updateQuestDisplay()
+                task.wait(HATCH_DELAY)
+            elseif EGGS[selectedEgg] then
                 teleportTo(EGGS[selectedEgg])
-                
-                -- Fast loop Remote invocation
-                RemoteEvent:FireServer("HatchEgg", selectedEgg, HATCH_AMOUNT)
-                
-                -- Virtual Input Intermittent E+R input emulation sequence
+                -- RESTORED: Concurrent simulated input keypresses for continuous hatching triggers
                 VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
                 VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
-                task.wait(0.05)
+                
+                RemoteEvent:FireServer("HatchEgg", selectedEgg, HATCH_AMOUNT)
+                
                 VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
                 VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
             end
             task.spawn(updateHatchDisplays)
-            task.wait(0.05)
+            task.wait(HATCH_DELAY)
         end
     end)
 end
@@ -1020,6 +1371,137 @@ savePosBtn.MouseButton1Click:Connect(function()
     end
 end)
 
+-- ======================================
+--   CHALLENGE PASS AUTO QUEST
+-- ======================================
+local function stopAutoQuest()
+    autoQuesting = false
+    if autoQuestThread then
+        pcall(function() task.cancel(autoQuestThread) end)
+        autoQuestThread = nil
+    end
+    if autoQuestBtn then
+        autoQuestBtn.Text = "Auto Quest: OFF"
+        autoQuestBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
+    end
+    setWalkSpeed(16)
+end
+
+local function doHatchQuest(challenge)
+    local q = challenge.quest
+    local targetEgg = (q and q.egg and EGGS[q.egg]) and q.egg or DEFAULT_HATCH_EGG
+    local pos = EGGS[targetEgg] or EGGS[DEFAULT_HATCH_EGG]
+
+    while autoQuesting and scriptActive do
+        if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then break end
+        teleportTo(pos)
+        RemoteEvent:FireServer("HatchEgg", targetEgg, HATCH_AMOUNT)
+        task.spawn(updateHatchDisplays)
+        updateQuestDisplay()
+        task.wait(HATCH_DELAY)
+    end
+end
+
+local function doBlowQuest(challenge)
+    if not savedBubblePos then
+        rayNotify("Auto Quest", "Save a bubble position first.", 3)
+        return
+    end
+
+    local wasHatching = running
+    if wasHatching then stopHatch() end
+
+    while autoQuesting and scriptActive do
+        if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then break end
+        teleportTo(savedBubblePos)
+        RemoteEvent:FireServer("BlowBubble")
+        RemoteEvent:FireServer("SellBubble")
+        updateQuestDisplay()
+        task.wait(HATCH_DELAY)
+    end
+
+    if wasHatching and autoQuesting and scriptActive then startHatch() end
+end
+
+local function doPlaytimeQuest(challenge)
+    while autoQuesting and scriptActive do
+        if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then break end
+        teleportTo(EGGS[DEFAULT_HATCH_EGG])
+        RemoteEvent:FireServer("HatchEgg", DEFAULT_HATCH_EGG, HATCH_AMOUNT)
+        task.spawn(updateHatchDisplays)
+        updateQuestDisplay()
+        task.wait(HATCH_DELAY)
+    end
+end
+
+local function startAutoQuest()
+    local challenges = getActiveChallenges()
+    if #challenges == 0 then
+        rayNotify("Auto Quest", "Open the Challenge Pass UI first so quests can be read.", 4)
+        if autoQuestBtn then autoQuestBtn.Text = "Auto Quest: OFF" end
+        return
+    end
+
+    autoQuesting = true
+    if running then
+        rayNotify("Auto Quest", "Auto Hatch will pause its selected-egg loop until quests are complete.", 4)
+    end
+    if autoQuestBtn then
+        autoQuestBtn.Text = "Auto Quest: ON"
+        autoQuestBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+    end
+    setWalkSpeed(WALKSPEED)
+
+    autoQuestThread = task.spawn(function()
+        while autoQuesting and scriptActive do
+            local active = getActiveChallenges()
+
+            if #active == 0 then
+                updateQuestDisplay()
+                task.wait(2)
+                continue
+            end
+
+            if allQuestsCompleted(active) then
+                RemoteEvent:FireServer("ChallengePassClaimAll")
+                task.wait(3)
+                updateQuestDisplay()
+                continue
+            end
+
+            for _, challenge in ipairs(active) do
+                if not autoQuesting or not scriptActive then break end
+                if isQuestCompleted(challenge.frame) or getQuestFillPct(challenge.frame) >= 1 then
+                    continue
+                end
+
+                local q = challenge.quest
+                if q.type == "Hatch" then
+                    doHatchQuest(challenge)
+                elseif q.type == "Blow" then
+                    doBlowQuest(challenge)
+                elseif q.type == "Playtime" then
+                    doPlaytimeQuest(challenge)
+                end
+
+                if autoQuesting and scriptActive then
+                    RemoteEvent:FireServer("ChallengePassClaimAll")
+                    task.wait(1)
+                    updateQuestDisplay()
+                end
+            end
+
+            task.wait(0.5)
+        end
+    end)
+end
+
+if autoQuestBtn then
+    autoQuestBtn.MouseButton1Click:Connect(function()
+        if autoQuesting then stopAutoQuest() else startAutoQuest() end
+    end)
+end
+
 -- Test Embed Generator
 testWebBtn.MouseButton1Click:Connect(function()
     testWebBtn.Text = "Simulating Premium Drop..."
@@ -1050,26 +1532,8 @@ testWebBtn.MouseButton1Click:Connect(function()
     testWebBtn.Text = "Send Integration Test Link"
 end)
 
--- Draggable Interface Core
-local UIS = game:GetService("UserInputService")
-local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
-sidebar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = frame.Position
-        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
-    end
-end)
-sidebar.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
-end)
-UIS.InputChanged:Connect(function(input)
-    if input == dragInput and dragging and scriptActive then
-        local delta = input.Position - dragStart
-        frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-    end
-end)
+-- Rayfield handles dragging and visibility internally.
+-- The old custom draggable code depended on custom Frame instances and breaks when using Rayfield or fallback proxy controls.
 
 -- Initialization Loops
 local loop1 = task.spawn(function() while scriptActive do task.wait(1) updateHatchDisplays() end end)
