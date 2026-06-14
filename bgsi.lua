@@ -52,12 +52,40 @@ end
 loadConfig()
 
 -- ======================================
---   STATE MANAGEMENT & BACKEND SCANNER
+--   STATE MANAGEMENT & HARDCODED EGGS
 -- ======================================
 local HATCH_AMOUNT = 12
 local WALKSPEED = 75
 
-local EGGS = {}
+local EGGS = {
+    ["Common Egg"]         = Vector3.new(-59.7594, 13.7468, -4.9295),
+    ["Inferno Egg"]        = Vector3.new(61.6161, -38.2405, -36.4416),
+    ["Classic Egg"]        = Vector3.new(-89.3765, 13.9007, 30.5915),
+    ["Vine Egg"]           = Vector3.new(-60.7224, 13.9614, 11.0473),
+    ["Lava Egg"]           = Vector3.new(-68.9796, 14.1626, 19.3721),
+    ["Icy Egg"]            = Vector3.new(-54.2339, 13.7070, 0.9815),
+    ["Iceshard Egg"]       = Vector3.new(-119.0674, 11.4101, 13.9992),
+    ["Spotted Egg"]        = Vector3.new(-91.7780, 12.9166, 12.3185),
+    ["Atlantis Egg"]       = Vector3.new(-78.4374, 14.7693, 25.9414),
+    ["Mining Egg"]         = Vector3.new(-121.7517, 11.0727, -68.1152),
+    ["Neon Egg"]           = Vector3.new(-81.3096, 10.9481, -60.4263),
+    ["Cyber Egg"]          = Vector3.new(-92.2678, 10.9795, -66.6913),
+    ["Spikey Egg"]         = Vector3.new(-128.6110, 10.8857, 9.7908),
+    ["Magma Egg"]          = Vector3.new(-137.1953, 11.1698, 3.5342),
+    ["Crystal Egg"]        = Vector3.new(-144.1717, 10.9745, -4.9899),
+    ["Rainbow Egg"]        = Vector3.new(-140.0540, 10.9538, -56.0581),
+    ["Void Egg"]           = Vector3.new(-150.2729, 11.1749, -26.0208),
+    ["Showman Egg"]        = Vector3.new(-131.7554, 12.0426, -63.2838),
+    ["Hell Egg"]           = Vector3.new(-149.3270, 11.1268, -36.8873),
+    ["Nightmare Egg"]      = Vector3.new(-146.0093, 10.9916, -46.9943),
+    ["Lunar Egg"]          = Vector3.new(-148.4841, 11.1363, -15.2603),
+    ["Dice Egg"]           = Vector3.new(9832.3232, 27.8746, 172.1069),
+    ["Secret Egg"]         = Vector3.new(-19438.9062, 8.6763, 18838.1113),
+    ["4x Luck Egg"]        = Vector3.new(2342, 3161, 999),
+    ["Flame Egg"]          = Vector3.new(764, 7611, -3464),
+    ["Frozen Egg"]         = Vector3.new(686, 7611, -3466),
+}
+
 local eggButtons = {}
 
 local running = false
@@ -73,7 +101,7 @@ local eggsHatched = 0
 local selectedEgg = Config.SELECTED_EGG
 local startTime = os.time()
 
-local hatchThread, teleportThread, eSpamThread, enchantThread, permShrineThread, timedShrineThread, scannerThread
+local hatchThread, teleportThread, eSpamThread, enchantThread, permShrineThread, timedShrineThread
 local loopThreads = {}
 local webhookQueue = {}
 local webhookProcessing = false
@@ -83,51 +111,43 @@ local connections = {}
 -- UI declaration forward references
 local eggScroll, eggLayout, questScroll, questLayout
 
--- Dynamic Backend Egg Environment Scanner with strict exclusions
-local function scanEggs()
-    local targetFolder = Workspace:FindFirstChild("Rendered") or Workspace
-    for _, obj in ipairs(targetFolder:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local nameLower = string.lower(obj.Name)
-            
-            if string.find(nameLower, "egg") 
-               and nameLower ~= "egg"
-               and not string.find(nameLower, "stand") 
-               and not string.find(nameLower, "mesh")
-               and not string.find(nameLower, "platform")
-               and not string.find(nameLower, "spawn")
-               and not string.find(nameLower, "rift") then
-               
-                local position = obj:IsA("BasePart") and obj.Position or obj:GetPivot().Position
-                if position and not EGGS[obj.Name] then
-                    EGGS[obj.Name] = position
-                    
-                    if eggScroll and eggButtons and not eggButtons[obj.Name] then
-                        local b = Instance.new("TextButton")
-                        b.Size = UDim2.new(1, -6, 0, 26)
-                        b.BackgroundColor3 = (selectedEgg == obj.Name) and Color3.fromRGB(0, 120, 200) or Color3.fromRGB(34, 34, 40)
-                        b.TextColor3 = Color3.fromRGB(230, 230, 240)
-                        b.Text = "   " .. obj.Name
-                        b.Font = Enum.Font.GothamMedium
-                        b.TextSize = 11
-                        b.BorderSizePixel = 0
-                        b.TextXAlignment = Enum.TextXAlignment.Left
-                        b.Parent = eggScroll
-                        eggButtons[obj.Name] = b
-                        
-                        b.MouseButton1Click:Connect(function()
-                            for _, btn in pairs(eggButtons) do btn.BackgroundColor3 = Color3.fromRGB(34, 34, 40) end
-                            selectedEgg = obj.Name
-                            Config.SELECTED_EGG = obj.Name
-                            saveConfig()
-                            b.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
-                        end)
-                        eggScroll.CanvasSize = UDim2.new(0, 0, 0, eggLayout.AbsoluteContentSize.Y + 5)
-                    end
-                end
-            end
-        end
+-- Generates the UI elements from the hardcoded positions list
+local function populateEggUI()
+    if not eggScroll then return end
+    
+    -- Clear out old listings to prevent overlap
+    for _, btn in pairs(eggButtons) do btn:Destroy() end
+    table.clear(eggButtons)
+
+    -- Sort eggs alphabetically for a cleaner interface
+    local sortedEggNames = {}
+    for eggName, _ in pairs(EGGS) do
+        table.insert(sortedEggNames, eggName)
     end
+    table.sort(sortedEggNames)
+
+    for _, eggName in ipairs(sortedEggNames) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -6, 0, 26)
+        b.BackgroundColor3 = (selectedEgg == eggName) and Color3.fromRGB(0, 120, 200) or Color3.fromRGB(34, 34, 40)
+        b.TextColor3 = Color3.fromRGB(230, 230, 240)
+        b.Text = "   " .. eggName
+        b.Font = Enum.Font.GothamMedium
+        b.TextSize = 11
+        b.BorderSizePixel = 0
+        b.TextXAlignment = Enum.TextXAlignment.Left
+        b.Parent = eggScroll
+        eggButtons[eggName] = b
+        
+        b.MouseButton1Click:Connect(function()
+            for _, btn in pairs(eggButtons) do btn.BackgroundColor3 = Color3.fromRGB(34, 34, 40) end
+            selectedEgg = eggName
+            Config.SELECTED_EGG = eggName
+            saveConfig()
+            b.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+        end)
+    end
+    eggScroll.CanvasSize = UDim2.new(0, 0, 0, eggLayout.AbsoluteContentSize.Y + 5)
 end
 
 -- ======================================
@@ -456,39 +476,6 @@ local function createFormRowInput(labelStr, placeholder, default, parent)
     return box
 end
 
-local function createFormRowInput(labelStr, placeholder, default, parent)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 28)
-    row.BackgroundTransparency = 1
-    row.Parent = parent
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0, 120, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = labelStr
-    lbl.TextColor3 = Color3.fromRGB(175, 175, 185)
-    lbl.Font = Enum.Font.GothamMedium
-    lbl.TextSize = 11
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-    
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(1, -125, 1, 0)
-    box.Position = UDim2.new(0, 125, 0, 0)
-    box.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
-    box.TextColor3 = Color3.fromRGB(255, 255, 255)
-    box.PlaceholderText = placeholder
-    box.Text = default
-    box.Font = Enum.Font.Gotham
-    box.TextSize = 11
-    box.BorderSizePixel = 0
-    box.ClearTextOnFocus = false
-    box.Parent = row
-    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
-    
-    return box
-end
-
 local function createToggleBtn(text, color, parent)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, 0, 0, 30)
@@ -538,7 +525,7 @@ local savePosBtn   = createToggleBtn("Save Position Anchor", Color3.fromRGB(80, 
 -- ======================================
 --   EGGS SELECTION PAGE
 -- ======================================
-local selectionCard = createSectionCard("DYNAMIC SCANNED EGGS", eggPage, 330)
+local selectionCard = createSectionCard("HARDCODED CHOSEN EGGS", eggPage, 330)
 
 eggScroll = Instance.new("ScrollingFrame")
 eggScroll.Size = UDim2.new(1, 0, 1, -4)
@@ -550,6 +537,9 @@ eggScroll.Parent = selectionCard
 eggLayout = Instance.new("UIListLayout")
 eggLayout.Padding = UDim.new(0, 3)
 eggLayout.Parent = eggScroll
+
+-- Build list instantly from positions table
+populateEggUI()
 
 -- ======================================
 --   ENCHANT CONFIGURATIONS PAGE
@@ -650,7 +640,7 @@ local termCard = createSectionCard("TERMINATION", settingsPage, 60)
 local exitBtn = createToggleBtn("End Script Session", Color3.fromRGB(150, 40, 45), termCard)
 
 -- ======================================
---   CORE INTERACTION AND SYSTEMS
+--   KEYBIND CONTEXT HANDLERS
 -- ======================================
 local listeningForBind = false
 bindBtn.MouseButton1Click:Connect(function()
@@ -694,7 +684,6 @@ local function unloadScript()
     if enchantThread then pcall(function() task.cancel(enchantThread) end) end
     if permShrineThread then pcall(function() task.cancel(permShrineThread) end) end
     if timedShrineThread then pcall(function() task.cancel(timedShrineThread) end) end
-    if scannerThread then pcall(function() task.cancel(scannerThread) end) end
     for _, t in ipairs(loopThreads) do pcall(function() task.cancel(t) end) end
     for _, c in ipairs(connections) do if c and c.Connected then c:Disconnect() end end
     
@@ -899,7 +888,6 @@ end)
 local function cleanHatchUI(child)
     if child.Name == "HatchEgg" or child.Name == "Hatch" then
         child.Enabled = false
-        -- Structural fallback injection for new game variants
         local mainFrame = child:FindFirstChildOfClass("Frame")
         if mainFrame then mainFrame.Visible = false end
         child:GetPropertyChangedSignal("Enabled"):Connect(function()
@@ -912,7 +900,6 @@ for _, c in ipairs(LocalPlayer.PlayerGui:GetChildren()) do cleanHatchUI(c) end
 local uiConnection = LocalPlayer.PlayerGui.ChildAdded:Connect(cleanHatchUI)
 table.insert(connections, uiConnection)
 
--- Hook structure targets the global metadata located within: ReplicatedStorage.Shared.Data.Pets
 local success, HatchingModule = pcall(function() return require(ReplicatedStorage.Client.Effects.HatchEgg) end)
 if success and HatchingModule and type(HatchingModule) == "table" and HatchingModule.Play then
     local originalPlay = HatchingModule.Play
@@ -938,9 +925,10 @@ if success and HatchingModule and type(HatchingModule) == "table" and HatchingMo
                 end
             end
         end
-        return -- Bypasses the original animation completely
+        return 
     end
 end
+
 -- Controls Interaction Loops
 local function startTeleport()
     if not selectedEgg or not EGGS[selectedEgg] then return end
@@ -971,11 +959,21 @@ local function startHatch()
     hatchThread = task.spawn(function()
         while running and scriptActive do
             if EGGS[selectedEgg] then
+                -- Lock positioning
                 teleportTo(EGGS[selectedEgg])
+                
+                -- Fast loop Remote invocation
                 RemoteEvent:FireServer("HatchEgg", selectedEgg, HATCH_AMOUNT)
+                
+                -- Virtual Input Intermittent E+R input emulation sequence
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
             end
             task.spawn(updateHatchDisplays)
-            task.wait(0.1)
+            task.wait(0.05)
         end
     end)
 end
@@ -1079,14 +1077,6 @@ table.insert(loopThreads, loop1)
 
 local loop2 = task.spawn(function() while scriptActive do task.wait(2.5) updateQuestDisplay() end end)
 table.insert(loopThreads, loop2)
-
--- Background Scanning Loop
-scannerThread = task.spawn(function()
-    while scriptActive do
-        scanEggs()
-        task.wait(2.5)
-    end
-end)
 
 switchTab(mainPage, mainTabBtn)
 if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
