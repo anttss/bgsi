@@ -1459,9 +1459,13 @@ startAutoRejoin = function()
             saveRejoinState("scheduled_rejoin")
             task.wait(1)
 
-            pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+            local ok, err = pcall(function()
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
             end)
+
+            if not ok then
+                warn("teleport failed:", err)
+            end
         end
     end)
 end
@@ -1847,18 +1851,16 @@ teleportBtn.MouseButton1Click:Connect(function() if teleporting then stopTelepor
 local function startHatch()
     if not selectedEgg or not EGGS[selectedEgg] then return end
     running = true
-    hatchBtn.Text = "Auto Hatch Core: ON"
+    hatchBtn.Text = "Auto Hatch: ON"
     hatchBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
     setWalkSpeed(WALKSPEED)
     hatchThread = task.spawn(function()
         while running and scriptActive do
             if shouldHoldMainHatchForQuests() then
-                -- Auto Quest owns teleporting/hatching until current Challenge Pass quests are complete.
                 updateQuestDisplay()
                 task.wait(HATCH_DELAY)
             elseif EGGS[selectedEgg] then
                 teleportTo(EGGS[selectedEgg])
-                -- RESTORED: Concurrent simulated input keypresses for continuous hatching triggers
                 VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
                 VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
                 
@@ -1875,7 +1877,7 @@ end
 local function stopHatch()
     running = false
     if hatchThread then task.cancel(hatchThread) hatchThread = nil end
-    hatchBtn.Text = "Auto Hatch Core: OFF"
+    hatchBtn.Text = "Auto Hatch: OFF"
     hatchBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
     setWalkSpeed(16)
 end
