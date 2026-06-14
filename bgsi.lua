@@ -20,7 +20,7 @@ local FILE_NAME = "Hub_Config.json"
 
 local function getDefaults()
     return {
-        WEBHOOK_URL = "https://discord.com/api/webhooks/1515448845054644254/h9VK3FvOyM55T_2_yfB5FB6jDuHj0AnGjgfvcD9l4TWJ8OVX2Bi4ObvaaWnpyRxi_VZZ",
+        WEBHOOK_URL = "",
         DISCORD_PING_ID = "",
         TOGGLE_KEY = "RightShift",
         FPS_CAP = "60",
