@@ -82,6 +82,10 @@ local configFile = "1rzHubLiteConfig.json"
     autoEquipBestPets = false,
     autoUpgradeMastery = false,
     autoCollectCoins = false,
+    autoBuyShops = false,
+    selectedShops = {},
+    selectedShopItems = {},
+    shopInterval = 1,
     autoBubble = false,
     autoSell = false,
     selectedMysteryBox = "Mystery Box",
@@ -3656,6 +3660,358 @@ do
             Config.autoSell = scriptStateAEL;saveConfig()
         end,
     })
+
+    gameTab:AddSection("Shops")
+
+    local cachedShopData = nil
+
+    local function getShopData()
+        if type(cachedShopData) == "table" then
+            return cachedShopData
+        end
+
+        local ok, shops = pcall(function()
+            return require(ReplicatedStorage.Shared.Data.Shops)
+        end)
+
+        if ok and type(shops) == "table" then
+            cachedShopData = shops
+        else
+            cachedShopData = {}
+        end
+
+        return cachedShopData
+    end
+
+    local function refreshShopData()
+        cachedShopData = nil
+        return getShopData()
+    end
+
+    local function getSelectedValues(selectionTable)
+        local selectedValues = {}
+
+        if type(selectionTable) ~= "table" then
+            return selectedValues
+        end
+
+        local hasArrayValues = false
+        for _, selectedName in ipairs(selectionTable) do
+            hasArrayValues = true
+            if type(selectedName) == "string" and selectedName ~= "" then
+                table.insert(selectedValues, selectedName)
+            end
+        end
+
+        if hasArrayValues then
+            return selectedValues
+        end
+
+        for selectedName, isSelected in pairs(selectionTable) do
+            if isSelected and type(selectedName) == "string" and selectedName ~= "" then
+                table.insert(selectedValues, selectedName)
+            end
+        end
+
+        table.sort(selectedValues)
+        return selectedValues
+    end
+
+    local function getSortedShopNames()
+        local shopNames = {}
+        local shops = getShopData()
+
+        for shopName in pairs(shops) do
+            if type(shopName) == "string" and shopName ~= "" then
+                table.insert(shopNames, shopName)
+            end
+        end
+
+        table.sort(shopNames)
+        return shopNames
+    end
+
+    local function getShopItemName(shopItem, depth)
+        depth = depth or 0
+        if depth > 4 or shopItem == nil then
+            return nil
+        end
+
+        if type(shopItem) == "string" then
+            return shopItem
+        end
+
+        if type(shopItem) ~= "table" then
+            return tostring(shopItem)
+        end
+
+        local itemData = shopItem.Item
+        if type(itemData) == "string" then
+            return itemData
+        elseif type(itemData) == "table" then
+            local productData = itemData.Product
+            if type(productData) == "string" then
+                return productData
+            elseif type(productData) == "table" then
+                local nestedProductName = getShopItemName(productData, depth + 1)
+                if nestedProductName then
+                    return nestedProductName
+                end
+            end
+
+            local directItemName = itemData.Name or itemData.Item or itemData.ItemName or itemData.Id
+            if type(directItemName) == "string" then
+                return directItemName
+            elseif directItemName ~= nil then
+                return tostring(directItemName)
+            end
+
+            if itemData[1] ~= nil then
+                return getShopItemName(itemData[1], depth + 1)
+            end
+        end
+
+        local directName = shopItem.Name or shopItem.ItemName or shopItem.Id or shopItem.Product
+        if type(directName) == "string" then
+            return directName
+        elseif directName ~= nil then
+            return tostring(directName)
+        end
+
+        if shopItem[1] ~= nil then
+            return getShopItemName(shopItem[1], depth + 1)
+        end
+
+        return nil
+    end
+
+    local function eachShopSlot(shopName, shopData, callback)
+        if type(shopData) ~= "table" then
+            return
+        end
+
+        for _, listName in ipairs({ "PermanentItems", "RandomItems", "Items" }) do
+            local itemList = shopData[listName]
+            if type(itemList) == "table" then
+                for slotIndex, shopItem in ipairs(itemList) do
+                    callback(shopName, slotIndex, shopItem)
+                end
+
+                for slotIndex, shopItem in pairs(itemList) do
+                    if type(slotIndex) ~= "number" or slotIndex > #itemList then
+                        callback(shopName, slotIndex, shopItem)
+                    end
+                end
+            end
+        end
+
+        if type(shopData.Slots) == "table" then
+            for slotIndex, shopItem in pairs(shopData.Slots) do
+                callback(shopName, tonumber(slotIndex) or slotIndex, shopItem)
+            end
+        end
+    end
+
+    local function getSortedShopItemNames()
+        local itemNames = {}
+        local seenItems = {}
+        local shops = getShopData()
+
+        for shopName, shopData in pairs(shops) do
+            if type(shopName) == "string" then
+                eachShopSlot(shopName, shopData, function(_, _, shopItem)
+                    local itemName = getShopItemName(shopItem)
+                    if type(itemName) == "string" and itemName ~= "" and not seenItems[itemName] then
+                        seenItems[itemName] = true
+                        table.insert(itemNames, itemName)
+                    end
+                end)
+            end
+        end
+
+        table.sort(itemNames)
+        return itemNames
+    end
+
+    local function resolveShopItemSelection(selectedItemName)
+        if type(selectedItemName) ~= "string" or selectedItemName == "" then
+            return nil, nil
+        end
+
+        local directShopName, directSlot = selectedItemName:match("^(.-)%s*|%s*Slot%s*#?(%d+)$")
+        if directShopName and directSlot then
+            return directShopName, tonumber(directSlot)
+        end
+
+        local selectedLower = string.lower(selectedItemName)
+        local shops = getShopData()
+
+        for shopName, shopData in pairs(shops) do
+            if type(shopName) == "string" then
+                local foundShop, foundSlot = nil, nil
+                eachShopSlot(shopName, shopData, function(currentShopName, slotIndex, shopItem)
+                    if foundShop then
+                        return
+                    end
+
+                    local itemName = getShopItemName(shopItem)
+                    if type(itemName) == "string" and string.lower(itemName) == selectedLower then
+                        foundShop = currentShopName
+                        foundSlot = slotIndex
+                    end
+                end)
+
+                if foundShop and foundSlot ~= nil then
+                    return foundShop, foundSlot
+                end
+            end
+        end
+
+        return nil, nil
+    end
+
+    local function getShopSlotCount(shopName)
+        local shopData = getShopData()[shopName]
+        if type(shopData) ~= "table" then
+            return 3
+        end
+
+        local slotCount = tonumber(shopData.SlotCount)
+        if slotCount and slotCount >= 1 then
+            return math.floor(slotCount)
+        end
+
+        for _, listName in ipairs({ "RandomItems", "PermanentItems", "Items" }) do
+            if type(shopData[listName]) == "table" and #shopData[listName] > 0 then
+                return #shopData[listName]
+            end
+        end
+
+        if type(shopData.Slots) == "table" then
+            local highestSlot = 0
+            for slotIndex in pairs(shopData.Slots) do
+                highestSlot = math.max(highestSlot, tonumber(slotIndex) or 0)
+            end
+            if highestSlot > 0 then
+                return highestSlot
+            end
+        end
+
+        return 3
+    end
+
+    local shopDropdown
+    local shopItemDropdown
+
+    local function refreshShopDropdowns()
+        refreshShopData()
+
+        local shopNames = getSortedShopNames()
+        local shopItemNames = getSortedShopItemNames()
+
+        if #shopNames == 0 then
+            shopNames = { "No shops found" }
+        end
+        if #shopItemNames == 0 then
+            shopItemNames = { "No shop items found" }
+        end
+
+        fireRemoteEventRepeatedly(shopDropdown, shopNames)
+        fireRemoteEventRepeatedly(shopItemDropdown, shopItemNames)
+    end
+
+    gameTab:AddButton({
+        Title = "Load Shop Lists",
+        Description = "Loads shop names and item names into the dropdowns below.",
+        Callback = function()
+            refreshShopDropdowns()
+        end,
+    })
+
+    shopDropdown = gameTab:AddDropdown("SelectedShops", {
+        Title = "Select Shops - leave empty for all",
+        Values = { "Click Load Shop Lists" },
+        Default = Config.selectedShops or {},
+        Multi = true,
+        Search = true,
+        Callback = function(selectedShops)
+            Config.selectedShops = selectedShops or {}
+            saveConfig()
+        end,
+    })
+
+    shopItemDropdown = gameTab:AddDropdown("SelectedShopItems", {
+        Title = "Select Shop Items - optional",
+        Values = { "Click Load Shop Lists" },
+        Default = Config.selectedShopItems or {},
+        Multi = true,
+        Search = true,
+        Callback = function(selectedShopItems)
+            Config.selectedShopItems = selectedShopItems or {}
+            saveConfig()
+        end,
+    })
+
+    gameTab:AddInput("ShopBuyInterval", {
+        Title = "Buy Delay",
+        Default = tostring(Config.shopInterval or 1),
+        Numeric = true,
+        Callback = function(intervalText)
+            local buyDelay = tonumber(intervalText)
+            if buyDelay then
+                Config.shopInterval = math.clamp(buyDelay, 0.1, 60)
+                saveConfig()
+            end
+        end,
+    })
+
+    gameTab:AddToggle("AutoBuyShops", {
+        Title = "Auto Buy Shops",
+        Description = "Buys selected shop items. If no item is selected, it buys random slots from selected shops.",
+        Default = Config.autoBuyShops == true,
+        Callback = function(enabled)
+            Config.autoBuyShops = enabled == true
+            saveConfig()
+        end,
+    })
+
+    task.spawn(function()
+        while true do
+            if Config.autoBuyShops ~= true then
+                task.wait(0.85)
+                continue
+            end
+
+            task.wait(tonumber(Config.shopInterval) or 1)
+
+            local selectedItems = getSelectedValues(Config.selectedShopItems or {})
+            if #selectedItems > 0 then
+                local selectedItem = selectedItems[math.random(1, #selectedItems)]
+                local shopName, slotIndex = resolveShopItemSelection(selectedItem)
+                if shopName and slotIndex ~= nil then
+                    pcall(function()
+                        remoteEvent:FireServer("BuyShopItem", shopName, slotIndex, true)
+                    end)
+                end
+            else
+                local selectedShops = getSelectedValues(Config.selectedShops or {})
+                if #selectedShops == 0 then
+                    selectedShops = getSortedShopNames()
+                end
+
+                if #selectedShops > 0 then
+                    local shopName = selectedShops[math.random(1, #selectedShops)]
+                    if getShopData()[shopName] then
+                        local slotIndex = math.random(1, getShopSlotCount(shopName))
+                        pcall(function()
+                            remoteEvent:FireServer("BuyShopItem", shopName, slotIndex, true)
+                        end)
+                    end
+                end
+            end
+        end
+    end)
+
     gameTab:AddSection("Mystery Boxes")
     local function getGiftNames()
         local giftNames = {
