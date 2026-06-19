@@ -5,10 +5,11 @@ if type(getgenv) == "function" then
         pcall(previousCleanup)
         globalEnv._1rzHubLitePetViewerCleanup = nil
     end
-    if rawget(globalEnv, "_1rzHubLite_Loaded") then
+    if rawget(globalEnv, "_1rzHubLite_Loaded") and rawget(globalEnv, "_1rzHubLite_LoadComplete") then
         return
     end
     globalEnv._1rzHubLite_Loaded = true
+    globalEnv._1rzHubLite_LoadComplete = false
 end
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -147,6 +148,8 @@ local configFile = "1rzHubLiteConfig.json"
     minigameDifficulty = "Easy",
 
     disableRendering = false,
+    renderDistance = 250,
+    chunkerRenderDistance = 4,
 }
 local legacyConfigFile = "1rzHubConfig.json"
             local Config
@@ -190,7 +193,113 @@ local function saveConfig()
         writefile(configFile, HttpService:JSONEncode(Config))
     end)
 end
+
+-- Helper function to safely require modules
+local function safeRequireTable(moduleLoaderFunction)
+    local success, module = pcall(moduleLoaderFunction)
+    return success and type(module) == "table" and module or nil
+end
+
+local function getChunkerModule()
+    local ChunkerModule = safeRequireTable(function()
+        local shared = ReplicatedStorage:WaitForChild("Shared", 5)
+        local utils = shared:WaitForChild("Utils", 5)
+        return require(utils:WaitForChild("Chunker", 5))
+    end)
+    if not ChunkerModule then
+        ChunkerModule = safeRequireTable(function()
+            return require(ReplicatedStorage.Shared.Utils.Chunker)
+        end)
+    end
+    if not ChunkerModule then
+        ChunkerModule = safeRequireTable(function()
+            local shared = ReplicatedStorage:WaitForChild("Shared", 5)
+            local framework = shared:WaitForChild("Framework", 5)
+            local classes = framework:WaitForChild("Classes", 5)
+            return require(classes:WaitForChild("Chunker", 5))
+        end)
+    end
+    if not ChunkerModule then
+        ChunkerModule = safeRequireTable(function()
+            return require(ReplicatedStorage.Shared.Framework.Classes.Chunker)
+        end)
+    end
+
+    return ChunkerModule
+end
+
+-- Function to refresh chunks around the player
+local function refreshChunkerAroundPlayer()
+    local ChunkerModule = getChunkerModule()
+
+    if not ChunkerModule or type(ChunkerModule.Update) ~= "function" then
+        return
+    end
+
+    local character = LocalPlayer.Character
+    local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+    local playerPosition = humanoidRootPart and humanoidRootPart.Position
+
+    if not playerPosition then
+        return
+    end
+
+    for _, entryName in ipairs({
+        "Instance",
+        "Singleton",
+        "Client",
+        "Chunker",
+        "Active",
+    }) do
+        local chunkerInstance = rawget(ChunkerModule, entryName)
+        if type(chunkerInstance) == "table" and type(chunkerInstance.Update) == "function" then
+            pcall(function()
+                chunkerInstance:Update(playerPosition)
+            end)
+        end
+    end
+end
+
 Config = loadConfig()
+Config.chunkerRenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRenderDistance) or 4))
+_G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
+
+-- Current clients do not expose Workspace.StreamingTargetRadius. The game
+-- controls rendered objects through each Chunker's RenderDistance instead.
+local function installChunkerRenderDistanceHook()
+    local ChunkerModule = getChunkerModule()
+    if not ChunkerModule or type(ChunkerModule.Update) ~= "function" then
+        return false
+    end
+
+    if rawget(ChunkerModule, "_BGSI_CHUNKER_TRUE_UPDATE") == nil then
+        ChunkerModule._BGSI_CHUNKER_TRUE_UPDATE = ChunkerModule.Update
+    end
+
+    local originalUpdate = ChunkerModule._BGSI_CHUNKER_TRUE_UPDATE
+    ChunkerModule.Update = function(self, playerPosition, ...)
+        if Config.disableRendering ~= true and type(self) == "table" then
+            self.RenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRenderDistance) or 4))
+        end
+        local updateResults = table.pack(pcall(originalUpdate, self, playerPosition, ...))
+        if updateResults[1] then
+            return table.unpack(updateResults, 2, updateResults.n)
+        end
+    end
+    return true
+end
+
+task.defer(function()
+    for _ = 1, 40 do
+        if installChunkerRenderDistanceHook() then
+            refreshChunkerAroundPlayer()
+            return
+        end
+        task.wait(0.5)
+    end
+    warn("[1rzHub Lite] Chunker render-distance hook could not find the Chunker module.")
+end)
+
 for loopSlotBI, scriptStateAAX in pairs(defaultConfig) do
     if Config[loopSlotBI] == nil then
         Config[loopSlotBI] = scriptStateAAX
@@ -1016,7 +1125,7 @@ local function spendGemsDownToReserve(scriptStateACD, scriptStateEM)
                     remoteEvent:FireServer("BuyShopItem", scriptStateZV.shop, scriptStateZV.slot, false)
                 end)
                 scriptStateHQ = true
-                task.wait(0.08)
+                task.wait(0.5)
                 scriptStateJR = getCurrentGems()
                 if scriptStateJR <= scriptStateWP then
                     break
@@ -1847,7 +1956,7 @@ do
                 rootPart.AssemblyLinearVelocity = Vector3.zero
                 rootPart.CFrame = pointCFrame
             end)
-            task.wait(0.08)
+            task.wait(0.5)
         end
         finishMinigame()
         _G.BGSI_IslandRaceReserved = false
@@ -1974,7 +2083,6 @@ do
         end,
     })
 
-    minigamesTab:AddSection("Visual")
     minigamesTab:AddToggle("FastMinigameTransitions", {
         Title = "Fast Minigame Transitions",
         Default = Config.fastMinigameTransitions,
@@ -2068,6 +2176,13 @@ do
             if Config.autoFishing then
                 pcall(runFishingStep)
             end
+        end
+    end)
+
+    task.spawn(function()
+        while true do
+            task.wait(1) -- Refresh every 1 second
+            refreshChunkerAroundPlayer()
         end
     end)
 end
@@ -4920,7 +5035,7 @@ task.spawn(function()
                     elseif isBubbleBountyTask(scriptStateWX) then
                         runBubbleBountyTask(fallbackUtilityB, scriptStateBJ, scriptStateGT, fallbackUtilityD)
                     else
-                        task.wait(0.5)
+                        task.wait(0.08)
                     end
                 end
             end
@@ -5069,7 +5184,7 @@ task.spawn(function()
                         elseif isBubbleBountyTask(scriptStateDY) then
                             runBubbleBountyTask(fallbackUtilityG, scriptStateAC, scriptStateADS, fallbackUtilityA)
                         else
-                            task.wait(0.5)
+                            task.wait(0.08)
                         end
                     end
                 end
@@ -5401,15 +5516,15 @@ local function runShrineDonation(scriptStateTR)
     return scriptStateCS
 end
 local scriptStateDX = {
-    Bubbles = "ð£",
-    Coins = "ðª",
-    Gems = "ð",
-    Snowflakes = "âï¸",
-    CircusTickets = "ðï¸",
-    GameTickets = "ð«",
-    Tickets = "ð«",
-    Pearls = "âª",
-    Clovers = "ð",
+    Bubbles = "\240\159\159\163",
+    Coins = "\240\159\170\153",
+    Gems = "\240\159\146\142",
+    Snowflakes = "\226\157\132\239\184\143",
+    CircusTickets = "\240\159\142\159\239\184\143",
+    GameTickets = "\240\159\142\171",
+    Tickets = "\240\159\142\171",
+    Pearls = "\226\154\170",
+    Clovers = "\240\159\141\128",
 }
 local statsUtil, worldUtil
 pcall(function()
@@ -5494,9 +5609,9 @@ local function getDiscordTimestamp()
         return scriptStateXG
     end
     for loopSlotAS, scriptStateAFC in ipairs(LocalPlayer.leaderstats:GetChildren()) do
-        if scriptStateAFC.Name == "ð£ Bubbles" then
+        if scriptStateAFC.Name == "\240\159\159\163 Bubbles" then
             scriptStateXG.BubblesBlown = scriptStateAFC.Value
-        elseif scriptStateAFC.Name == "ð¥ Hatches" then
+        elseif scriptStateAFC.Name == "\240\159\165\154 Hatches" then
             scriptStateXG.EggsHatched = scriptStateAFC.Value
         end
     end
@@ -5648,12 +5763,17 @@ local function sendPetWebhook(scriptStateUL, scriptStateADL, scriptStateXY)
     end
     local scriptStateWR = string.match(tostring(scriptStateOI), "rbxassetid://(%d+)") or tostring(tonumber(scriptStateOI) or "")
             if scriptStateWR ~= "" then
-        local scriptStateACO =("https://thumbnails.roblox.com/v1/assets?assetIds = %s&size = 420x420&format = Png"):format(scriptStateWR)
+        local scriptStateACO = ("https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png"):format(scriptStateWR)
             local scriptStateFI
-        pcall(function()
+        local thumbnailRequestOk = pcall(function()
             scriptStateFI = game:HttpGet(scriptStateACO)
         end)
-        if scriptStateFI and scriptStateFI ~= "" then
+        if not thumbnailRequestOk or not scriptStateFI or scriptStateFI == "" then
+            thumbnailRequestOk = pcall(function()
+                scriptStateFI = HttpService:GetAsync(scriptStateACO)
+            end)
+        end
+        if thumbnailRequestOk and scriptStateFI and scriptStateFI ~= "" then
             local scriptStateABU, scriptStateNH = pcall(function()
                 return HttpService:JSONDecode(scriptStateFI)
             end)
@@ -5901,10 +6021,10 @@ task.spawn(function()
                 threshold = scriptStateHE
             })
         end
-        getAdminRebirthPetCandidate("Coins", "Coins", "ðª", Config.webhookLowCoinsBelow)
-        getAdminRebirthPetCandidate("Gems", "Gems", "ð", Config.webhookLowGemsBelow)
-        getAdminRebirthPetCandidate("Pearls", "Pearls", "âª", Config.webhookLowPearlsBelow)
-        getAdminRebirthPetCandidate("Tickets", "Tickets", "ð«", Config.webhookLowTicketsBelow)
+        getAdminRebirthPetCandidate("Coins", "Coins", "\240\159\170\153", Config.webhookLowCoinsBelow)
+        getAdminRebirthPetCandidate("Gems", "Gems", "\240\159\146\142", Config.webhookLowGemsBelow)
+        getAdminRebirthPetCandidate("Pearls", "Pearls", "\226\154\170", Config.webhookLowPearlsBelow)
+        getAdminRebirthPetCandidate("Tickets", "Tickets", "\240\159\142\171", Config.webhookLowTicketsBelow)
         if # scriptStateACF > 0 then
             local scriptStateYP = {
                 {
@@ -6025,11 +6145,11 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
         if type(scriptStateEQ.Stats) == "table" then
             for loopSlotCH, scriptStateACC in pairs(scriptStateEQ.Stats) do
                 local scriptStateAAB = scriptStateDX[loopSlotCH] or ""
-                table.insert(scriptStateYA, string.format("â%s %s: +%s", scriptStateAAB, loopSlotCH, runShrineDonation(math.floor(scriptStateACC * scriptStateAFP))))
+                table.insert(scriptStateYA, string.format("\226\128\140%s %s: +%s", scriptStateAAB, loopSlotCH, runShrineDonation(math.floor(scriptStateACC * scriptStateAFP))))
             end
         end
         if scriptStateEQ.Tag and scriptStateEQ.Tag ~= "" then
-            table.insert(scriptStateYA, "ð·ï¸ Origins: "..tostring(scriptStateEQ.Tag))
+            table.insert(scriptStateYA, "\240\159\143\183\239\184\143 Origins: "..tostring(scriptStateEQ.Tag))
         end
         local scriptStateZY =(# scriptStateYA > 0) and table.concat(scriptStateYA, "\n") or "No stats available"
             local scriptStateVN = buildPetWebhookEmbed(scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
@@ -6316,6 +6436,24 @@ end) do
             end)
         end,
     })
+    scriptStateAFW:AddInput("ChunkerRenderDistance", {
+        Title = "Chunk render distance",
+        Description = "Controls how many game chunks are rendered around you.",
+        Default = tostring(Config.chunkerRenderDistance),
+        Placeholder = "e.g. 4, 15, 30",
+        Numeric = true,
+        Callback = function(value)
+            local renderDistance = tonumber(value)
+            if not renderDistance or renderDistance ~= renderDistance then
+                return
+            end
+            Config.chunkerRenderDistance = math.max(1, math.floor(renderDistance))
+            _G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
+            installChunkerRenderDistanceHook()
+            saveConfig()
+            refreshChunkerAroundPlayer()
+        end,
+    })
     pcall(function()
         RunService:Set3dRenderingEnabled(not Config.disableRendering)
     end)
@@ -6325,3 +6463,6 @@ Fluent:Notify({
     Content = "Loaded.",
     Duration = 3
 })
+if type(getgenv) == "function" then
+    getgenv()._1rzHubLite_LoadComplete = true
+end
