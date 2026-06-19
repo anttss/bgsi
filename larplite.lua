@@ -116,6 +116,7 @@ local configFile = "1rzHubLiteConfig.json"
     webhookLowPearlsBelow = "",
     webhookLowTicketsBelow = "",
     webhookLowCurrencyCooldownMinutes = 30,
+    selectedTicketTeam = "",
     webhookRarities = {
         Secret = true,
         Legendary = false,
@@ -935,9 +936,9 @@ local function isCoinOrCollectBountyTask(shopItemEntry)
         return false
     end
     local scriptStateNC = shopItemEntry.Type or shopItemEntry.type
-            if type(scriptStateNC) == "string" then
+    if type(scriptStateNC) == "string" then
         local scriptStateZA = string.lower(scriptStateNC)
-            if scriptStateZA == "collect" or scriptStateZA == "coins" or scriptStateZA == "coin" then
+            if scriptStateZA == "collect" or scriptStateZA == "coins" or scriptStateZA == "coin" or string.find(scriptStateZA, "ticket", 1, true) then
             return true
         end
     end
@@ -949,15 +950,28 @@ local function isCoinOrCollectBountyTask(shopItemEntry)
 end
 local function getBountyCurrencyName(scriptStateADE)
     scriptStateADE = normalizeBountyTask(scriptStateADE)
-    if type(scriptStateADE) ~= "table" or type(scriptStateADE.Item) ~= "table" then
+    if type(scriptStateADE) ~= "table" then
         return nil
     end
-    if scriptStateADE.Item.Type ~= "Currency" then
-        return nil
+    local scriptStateAAW = type(scriptStateADE.Item) == "table" and scriptStateADE.Item or {}
+    local scriptStateN = scriptStateAAW.Currency or scriptStateADE.Currency
+    if type(scriptStateN) == "string" and string.find(string.lower(scriptStateN), "ticket", 1, true) then
+        return "tickets"
     end
-    local scriptStateN = scriptStateADE.Item.Currency
-            if type(scriptStateN) == "string" then
+    if scriptStateAAW.Type == "Currency" and type(scriptStateN) == "string" then
         return string.lower(scriptStateN)
+    end
+    for _, scriptStateAAA in ipairs({
+        scriptStateADE.Type,
+        scriptStateADE.Name,
+        scriptStateADE.Title,
+        scriptStateADE.Description,
+        scriptStateAAW.Type,
+        scriptStateAAW.Name,
+    }) do
+        if type(scriptStateAAA) == "string" and string.find(string.lower(scriptStateAAA), "ticket", 1, true) then
+            return "tickets"
+        end
     end
     return nil
 end
@@ -1176,8 +1190,11 @@ local function installPickupRangeHook()
             return scriptStateOA
         end
         local featureActive = activeStates.BGSI_Lite_GemGenieActive or activeStates.BGSI_Lite_SeasonActive or activeStates.BGSI_Lite_GlobalIncentiveActive
+            if activeStates.BGSI_Lite_TicketPickupActive then
+                return math.max(scriptStateOA, 1000000)
+            end
             if Config.autoCollectCoins == true or featureActive then
-            return math.max(scriptStateOA, scriptStateHD)
+                return math.max(scriptStateOA, scriptStateHD)
         end
         return scriptStateOA
     end
@@ -1297,7 +1314,158 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
         task.wait(0.08)
     end
 end
+
+do
+local ticketFarmCFrame = CFrame.new(9913.1104, 26.3498, 185.9215)
+local ticketTutorialModule
+local ticketCollectPickupRemote
+
+local function getPetTeamState()
+    local scriptStateTeamData
+    pcall(function()
+        if profileStore:IsReady() then
+            scriptStateTeamData = profileStore:Get()
+        end
+    end)
+    return type(scriptStateTeamData) == "table" and scriptStateTeamData or nil
+end
+activeStates.BGSI_Lite_GetPetTeamState = getPetTeamState
+
+local function resolvePetTeamKey(scriptStateSelectedTeam)
+    if scriptStateSelectedTeam == nil or tostring(scriptStateSelectedTeam) == "" then
+        return nil
+    end
+    local scriptStateTeamData = getPetTeamState()
+    local scriptStateTeams = scriptStateTeamData and scriptStateTeamData.Teams
+    if type(scriptStateTeams) ~= "table" then
+        return nil
+    end
+    for scriptStateTeamKey, scriptStateTeam in pairs(scriptStateTeams) do
+        local scriptStateTeamName = type(scriptStateTeam) == "table" and (scriptStateTeam.Name or scriptStateTeam.TeamName) or nil
+        if tostring(scriptStateTeamKey) == tostring(scriptStateSelectedTeam)
+            or (scriptStateTeamName and tostring(scriptStateTeamName) == tostring(scriptStateSelectedTeam)) then
+            return scriptStateTeamKey
+        end
+    end
+    return nil
+end
+
+local function equipPetTeam(scriptStateTargetTeam)
+    local scriptStateResolvedTeam = resolvePetTeamKey(scriptStateTargetTeam)
+    if scriptStateResolvedTeam == nil then
+        return false
+    end
+    local scriptStateTeamData = getPetTeamState()
+    if scriptStateTeamData and tostring(scriptStateTeamData.TeamEquipped) == tostring(scriptStateResolvedTeam) then
+        return true
+    end
+    for _, scriptStateTeamAction in ipairs({ "EquipTeam", "EquipPetTeam", "SetTeam", "SelectTeam", "SetEquippedTeam" }) do
+        pcall(function()
+            remoteEvent:FireServer(scriptStateTeamAction, scriptStateResolvedTeam)
+        end)
+        local scriptStateDeadline = tick() + 0.45
+        repeat
+            task.wait(0.05)
+            scriptStateTeamData = getPetTeamState()
+            if scriptStateTeamData and tostring(scriptStateTeamData.TeamEquipped) == tostring(scriptStateResolvedTeam) then
+                return true
+            end
+        until tick() >= scriptStateDeadline
+    end
+    return false
+end
+
+local function collectEveryActivePickup()
+    if not ticketTutorialModule then
+        pcall(function()
+            ticketTutorialModule = require(ReplicatedStorage.Client.Tutorial)
+        end)
+    end
+    local scriptStateTutorial = ticketTutorialModule
+    if type(scriptStateTutorial) == "table" then
+        if type(scriptStateTutorial.GetTutorial) == "function" then
+            pcall(function()
+                scriptStateTutorial = scriptStateTutorial:GetTutorial()
+            end)
+        elseif type(scriptStateTutorial.getTutorial) == "function" then
+            pcall(function()
+                scriptStateTutorial = scriptStateTutorial:getTutorial()
+            end)
+        end
+    end
+    local scriptStatePickups = type(scriptStateTutorial) == "table" and rawget(scriptStateTutorial, "_activePickups") or nil
+    if type(scriptStatePickups) ~= "table" then
+        return
+    end
+    if not ticketCollectPickupRemote then
+        local scriptStateRemote = ReplicatedStorage:FindFirstChild("CollectPickup", true)
+        if scriptStateRemote and scriptStateRemote:IsA("RemoteEvent") then
+            ticketCollectPickupRemote = scriptStateRemote
+        end
+    end
+    for scriptStatePickupId, scriptStatePickup in pairs(scriptStatePickups) do
+        if scriptStatePickup then
+            pcall(function()
+                if ticketCollectPickupRemote then
+                    ticketCollectPickupRemote:FireServer(scriptStatePickupId)
+                else
+                    remoteEvent:FireServer("CollectPickup", scriptStatePickupId)
+                end
+            end)
+        end
+    end
+end
+
+local ticketPickupTaskRunning = false
+local function runTicketPickupTask(scriptStateGetQuest, scriptStateTaskIndex, scriptStateRequirement, scriptStateShouldContinue)
+    while ticketPickupTaskRunning and scriptStateShouldContinue() do
+        task.wait(0.2)
+    end
+    if not scriptStateShouldContinue() then
+        return
+    end
+    ticketPickupTaskRunning = true
+    local scriptStateTeamData = getPetTeamState()
+    local scriptStatePreviousTeam = scriptStateTeamData and scriptStateTeamData.TeamEquipped or nil
+    activeStates.BGSI_Lite_TicketPickupActive = true
+    pcall(installPickupRangeHook)
+    if type(Config.selectedTicketTeam) == "string" and Config.selectedTicketTeam ~= "" then
+        equipPetTeam(Config.selectedTicketTeam)
+    end
+    local scriptStateLastTeleport = 0
+    pcall(function()
+        while scriptStateShouldContinue() do
+            local scriptStateQuest = scriptStateGetQuest()
+            if not scriptStateQuest then
+                break
+            end
+            local scriptStateTask = scriptStateQuest.Tasks and scriptStateQuest.Tasks[scriptStateTaskIndex]
+            local scriptStateNeeded = scriptStateTask and getBountyTaskRequirement(scriptStateTask) or scriptStateRequirement
+            if getBountyTaskProgress(scriptStateQuest, scriptStateTaskIndex) >= scriptStateNeeded or scriptStateQuest.Completed == true then
+                break
+            end
+            if tick() - scriptStateLastTeleport >= 2 then
+                teleportToCFrame(ticketFarmCFrame)
+                scriptStateLastTeleport = tick()
+            end
+            collectEveryActivePickup()
+            task.wait(0.1)
+        end
+    end)
+    activeStates.BGSI_Lite_TicketPickupActive = false
+    if scriptStatePreviousTeam ~= nil then
+        equipPetTeam(scriptStatePreviousTeam)
+    end
+    ticketPickupTaskRunning = false
+end
+activeStates.BGSI_Lite_RunTicketPickupTask = runTicketPickupTask
+end
+
 local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, scriptStateMZ, scriptStateSS, scriptStateF)
+    if type(scriptStateF) == "string" and string.find(string.lower(scriptStateF), "ticket", 1, true) then
+        activeStates.BGSI_Lite_RunTicketPickupTask(scriptStateSM, scriptStateOX, scriptStateMZ, scriptStateSS)
+        return
+    end
     teleportToCurrencyArea(scriptStateF)
     task.wait(0.2)
     local shopItemLoopCount = 0
@@ -1350,6 +1518,7 @@ activeStates.BGSI_Lite_GemGenieActive = false
 activeStates.BGSI_Lite_SeasonActive = false
 activeStates.BGSI_Lite_GlobalIncentiveActive = false
 activeStates.BGSI_Lite_RiftEggActive = false
+activeStates.BGSI_Lite_TicketPickupActive = false
 local function isPriorityAutomationActive()
     return activeStates.BGSI_Lite_GemGenieActive or activeStates.BGSI_Lite_SeasonActive or activeStates.BGSI_Lite_GlobalIncentiveActive
 end
@@ -4829,6 +4998,65 @@ end) do
             Config.autoDailyHourlyChallenge = scriptStateABO;saveConfig()
         end,
     })
+    scriptStateUC:AddSection("Ticket Collection")
+    local ticketTeamDropdown
+    local ticketTeamOptionKeys = {}
+    local function buildTicketTeamOptions()
+        local scriptStateOptions = {}
+        ticketTeamOptionKeys = {}
+        local scriptStateTeamData = activeStates.BGSI_Lite_GetPetTeamState()
+        local scriptStateTeams = scriptStateTeamData and scriptStateTeamData.Teams
+        if type(scriptStateTeams) == "table" then
+            for scriptStateTeamKey, scriptStateTeam in pairs(scriptStateTeams) do
+                local scriptStateTeamName = type(scriptStateTeam) == "table" and (scriptStateTeam.Name or scriptStateTeam.TeamName) or nil
+                local scriptStateLabel = string.format("%s [%s]", tostring(scriptStateTeamName or "Team"), tostring(scriptStateTeamKey))
+                ticketTeamOptionKeys[scriptStateLabel] = scriptStateTeamKey
+                table.insert(scriptStateOptions, scriptStateLabel)
+            end
+        end
+        table.sort(scriptStateOptions)
+        if # scriptStateOptions == 0 then
+            scriptStateOptions = { "(No teams found - refresh)" }
+        end
+        local scriptStateDefault = scriptStateOptions[1]
+        for scriptStateLabel, scriptStateTeamKey in pairs(ticketTeamOptionKeys) do
+            if tostring(scriptStateTeamKey) == tostring(Config.selectedTicketTeam or "") then
+                scriptStateDefault = scriptStateLabel
+                break
+            end
+        end
+        return scriptStateOptions, scriptStateDefault
+    end
+    local ticketTeamOptions, ticketTeamDefault = buildTicketTeamOptions()
+    ticketTeamDropdown = scriptStateUC:AddDropdown("TicketPetTeam", {
+        Title = "Ticket Pet Team",
+        Description = "Used during ticket collection quests, then your previous team is restored.",
+        Values = ticketTeamOptions,
+        Default = ticketTeamDefault,
+        Multi = false,
+        Search = true,
+        Callback = function(scriptStateSelectedTeamLabel)
+            local scriptStateSelectedTeamKey = ticketTeamOptionKeys[scriptStateSelectedTeamLabel]
+            if scriptStateSelectedTeamKey ~= nil then
+                Config.selectedTicketTeam = tostring(scriptStateSelectedTeamKey)
+                saveConfig()
+            end
+        end,
+    })
+    scriptStateUC:AddButton({
+        Title = "Refresh Pet Teams",
+        Callback = function()
+            local scriptStateOptions, scriptStateDefault = buildTicketTeamOptions()
+            if ticketTeamDropdown.SetValues then
+                ticketTeamDropdown:SetValues(scriptStateOptions)
+            end
+            if ticketTeamDropdown.SetValue then
+                pcall(function()
+                    ticketTeamDropdown:SetValue(scriptStateDefault)
+                end)
+            end
+        end,
+    })
     scriptStateUC:AddSection("Global Incentive")
     scriptStateUC:AddToggle("AutoGlobalIncentive", {
         Title = "Auto Global Incentive Quests",
@@ -6438,7 +6666,7 @@ end) do
     })
     scriptStateAFW:AddInput("ChunkerRenderDistance", {
         Title = "Chunk render distance",
-        Description = "Controls how many game chunks are rendered around you.",
+        Description = "yk",
         Default = tostring(Config.chunkerRenderDistance),
         Placeholder = "e.g. 4, 15, 30",
         Numeric = true,
